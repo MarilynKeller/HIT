@@ -1,0 +1,91 @@
+  
+hydra:
+  run:
+    dir: .
+  job:
+    chdir: true
+  output_subdir: null
+
+lr: 0.0001
+batch_size: 8
+num_workers: 12
+
+checkpoint_every_n_epochs: 10
+ckpt_path: None
+render_dataset: False
+exp_name: 'hydra_test'
+resume: False
+wdboff: False
+
+build_val_meshes_every_n_epochs: 20
+export_canmeshes_every_n_epochs: 20 
+
+use_scheduler : False
+weight_decay_compressor : 0.001
+
+# Set the training objective
+overfit_style : posed # 'template', 'unposed', posed, only considered if self.data_cfg.subjects != 'all'
+
+# Test time options
+run_eval: False # Set to true to run the evaluation instead of training
+visuals_only: False
+eval_export_visuals: False
+slices : False # Export slices when tested
+
+defaults:
+  - train_cfg: train
+
+smpl_cfg:
+  gender: 'male'
+  num_betas: 10
+
+data_cfg:
+ 
+  # Data caching
+  force_recache : False # Force recaching of the dataset
+  use_gzip : False # use gzip for caching. If false pkl will be used
+
+  # Subjects to load
+  # mri subjects
+  subjects : 'all' # 'lowest_b1', 'all' 'first' "two" Lowest_b1 is the largerst subject (max beta1)
+  # Synthetic SMPL subjects
+  synthetic: False
+  synt_style: random # random_per_joint ,random
+
+  # Data processing
+  filter_LT: True # Process the LT mask with an opening to remove the skin layer
+  body_normals : False # If true, store the normals of the body surface in the training batch
+  
+  # Sampling of points in the MRI array for training
+  n_pts_mri : 6000 # points to sample from the mri for each training step
+  sampling_strategy : "mri" #"per_tissue" #"per_part" "boundary" local "mri"  Method to use to sample the MRI voxels during the training
+  dilate_body_mask : True # We only sample points inside the body mask for training. Dilating this body mask enables sampling more points around the edge of the body
+
+  # Sampling of points in the canonical space
+  sample_can_points : True # Add keys data['can_points'] and data['can_occ'] to a batch
+  uniform_sampling_padding: 0.2 # Padding arround the body's bounding box for the canonical space uniform sampling
+  nb_points_canspace : 5000000 # Point sampled in a cube around the body in the canonical space
+  n_skin_pts : 0 # Number of points to sample around the skin surface in the canonical space
+  surface_offset_min : 0.002 # Ueed as a min offset for the surface sampling
+  surface_offset_max : 0.05 # Same as above but max
+
+  # hands can sampling
+  sample_can_hands : True # Sample points in the hands bounding box
+  n_points_hands : 5000 # Per smpl hand part
+  
+  # unused
+  sample_can_toes : False # Sample points in the fee bounding box
+  precompute_dist : False # Store the sampled pts occupancy and dist to surface in the batch dict. This is slow to compute and not used in the current version
+  use_gradient : False
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  check_val_every_n_epoch: 10
+  num_sanity_val_steps: 0
+  log_every_n_steps: 1
+  max_epochs: 1000
+  gradient_clip_val : 0.5
+  accumulate_grad_batches: 1
+  
+
