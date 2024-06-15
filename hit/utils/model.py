@@ -2,7 +2,6 @@ import os
 
 import hit_config as cg
 from model.hit_model import HITModel
-import smplx
 from utils.exppath import Exppath
 from model.mysmpl import MySmpl
 from omegaconf import OmegaConf
@@ -43,21 +42,10 @@ class HitLoader():
         return cls(checkpoint, cfg)
             
     def load(self):
-
-        # body_model = smplx.create(model_path=cg.smplx_models_path, model_type='smpl', gender=gender, num_pca_comps=10)   
-        # body_model = body_model.to(self.device)
         
         self.smpl = MySmpl(model_path=cg.smplx_models_path, gender=self.cfg.smpl_cfg.gender).to(self.device)
         self.hit_model = HITModel(train_cfg=self.cfg.train_cfg, smpl=self.smpl).to(self.device)
         self.hit_model.initialize(checkpoint_path=self.checkpoint, train_cfg = self.cfg.train_cfg)
-        
-        # hit_model = attach_coap(body_model, device=self.device, checkpoint_path=self.checkpoint, train_cfg=self.cfg['train_cfg'])
-        # hit_model = hit_model.to(self.device)
-        
-        # self.smpl = MySmpl(model_path=cg.smplx_models_path ,gender=gender, device=self.device).to(self.device)
-        # self.hit_model = hit_model
-
-        # self.train_folder = train_folder
         
 
         
