@@ -18,7 +18,7 @@ def main():
     parser.add_argument('--exp_name', type=str, default='rel_male',
                         help='Name of the checkpoint experiment to use for inference' 
                         ) #TODO change to checkpoint path
-    parser.add_argument('--target_body', type=str, default='assets/sit.pkl', 
+    parser.add_argument('--target_body', type=str, default='assets/standing.pkl', 
                         help='Path to the SMPL file to infer tissues from')
     parser.add_argument('--out_folder', type=str, default='output',
                         help='Output folder to save the generated meshes')
