@@ -9,8 +9,8 @@ wandb_entity = 'mkeller' # wandb account or team to log to
 wandb_project_name = 'hit_rel' # wandb project to log to
 
 # After running the pretraining, set the path to the pretrained models here to train HIT
-pretrained_male_smpl = os.path.join(package_directory, 'pretrained/pretrained_male_smpl.ckpt') 
-pretrained_female_smpl = os.path.join(package_directory, 'pretrained/pretrained_female_smpl.ckpt') 
+pretrained_male_smpl = os.path.join(package_directory, '../pretrained/pretrained_male_smpl.ckpt') 
+pretrained_female_smpl = os.path.join(package_directory, '../pretrained/pretrained_female_smpl.ckpt') 
 
 ##################
 # assets
