@@ -143,7 +143,6 @@ For example, this generates the occupancy for the frontal (x,0,z) slice:
 python demos/infer_smpl.py  --exp_name=hit_male --to_infer smpl_file --target_body assets/standing.pkl
 ``` 
 
-
 # Dataset
 
 The dataset is hosted on [Huggingface](https://huggingface.co/datasets/varora/HIT) and will be downloaded automatically when the code is run. 
@@ -250,14 +249,15 @@ We also thank Soubhik Sanyal for his help on the project.
 If you use this code, please cite the following paper:
 
 ```
-@inproceedings{Keller:CVPR:2024,
- title = {{HIT}: Estimating Internal Human Implicit Tissues from the Body Surface},
- author = {Keller, Marilyn and Arora, Vaibhav and Dakri, Abdelmouttaleb and Chandhok, Shivam and 
- Machann, Jürgen and Fritsche, Andreas and Black, Michael J. and Pujades, Sergi},   
- booktitle = {Proceedings IEEE/CVF Conf.~on Computer Vision and Pattern Recognition (CVPR)},
- month = jun,
- year = {2024},
- month_numeric = {6}}
+@inproceedings{keller2024hit,
+  title = {{HIT}: Estimating Internal Human Implicit Tissues from the Body Surface},
+  author = {Keller, Marilyn and Arora, Vaibhav and Dakri, Abdelmouttaleb and Chandhok, Shivam and Machann, J{\"u}rgen and Fritsche, Andreas and Black, Michael J. and Pujades, Sergi},
+  booktitle = {IEEE/CVF Conf.~on Computer Vision and Pattern Recognition (CVPR)},
+  pages = {3480--3490},
+  month = jun,
+  year = {2024},
+  month_numeric = {6}
+}
 ```
 
 ## Contact
