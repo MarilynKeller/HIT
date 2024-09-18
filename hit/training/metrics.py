@@ -3,7 +3,6 @@ import os
 import utils.figures
 import matplotlib.pyplot as plt
 import numpy as np
-import SimpleITK as sitk
 import torch
 import tqdm
 from utils.video import make_gif, make_video
@@ -151,6 +150,7 @@ def compute_hd(occ_pred, occ_gt, mri_coords, mri_shape, spacing, level=0.5):
             hd = 100
             
         else:
+            import SimpleITK as sitk
             im_gt = sitk.GetImageFromArray(im_gt_array)
             im_pred = sitk.GetImageFromArray(im_pred_array)
 

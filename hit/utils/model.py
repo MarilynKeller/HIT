@@ -1,10 +1,11 @@
 import os
 
-import hit_config as cg
-from model.hit_model import HITModel
-from utils.exppath import Exppath
-from model.mysmpl import MySmpl
 from omegaconf import OmegaConf
+
+import hit.hit_config as cg
+from hit.model.hit_model import HITModel
+from hit.utils.exppath import Exppath
+from hit.model.mysmpl import MySmpl
 
 
 class HitLoader():

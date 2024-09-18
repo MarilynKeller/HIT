@@ -23,8 +23,6 @@ import hit.training.metrics as metrics
 from hit.training.losses import *
 from hit.utils.tensors import cond_create
 from hit.training.dataloader_mri import MRI_SHAPE, MRIDataset
-from hit.utils.renderer import Renderer
-
 
 class HITTraining(pl.LightningModule):
     def __init__(self, cfg, checkpoint_fct=None):
@@ -53,8 +51,7 @@ class HITTraining(pl.LightningModule):
         self.smpl = MySmpl(model_path=cg.smplx_models_path, gender=self.cfg.smpl_cfg.gender)
         self.hit = HITModel(train_cfg=self.cfg.train_cfg, smpl=self.smpl)
         self.hit.initialize(pretrained=False, train_cfg = self.hit.train_cfg)
-     
-        self.renderer = Renderer()
+
         
         self.max_queries = self.train_cfg['max_queries'] # to prevent OOM at inference time
         

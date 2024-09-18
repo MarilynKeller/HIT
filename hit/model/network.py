@@ -3,8 +3,8 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from model.helpers import expand_cond, grid_sample_feat, mask_dict
 import torchvision
+from hit.model.helpers import expand_cond, grid_sample_feat, mask_dict
 
 class MySoftplus(nn.Softplus):
     

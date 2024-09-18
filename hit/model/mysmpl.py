@@ -6,7 +6,7 @@ from typing import NewType, Optional
 
 import numpy as np
 import torch
-from utils.smpl_utils import psm
+from hit.utils.smpl_utils import psm
 from hit.smpl.smplx.body_models import SMPL
 from hit.smpl.smplx.lbs import (batch_rigid_transform, batch_rodrigues,
                             blend_shapes, vertices2joints)

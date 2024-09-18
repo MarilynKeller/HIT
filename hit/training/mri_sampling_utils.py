@@ -3,7 +3,7 @@ import importlib
 import numpy as np
 import torch
 from scipy import ndimage
-
+from scipy.ndimage.filters import gaussian_filter
 
 def metric_2_mri(mri_data, query_points):
     '''THis function works weather the data have a batch dimension or not. 
@@ -304,13 +304,9 @@ def compute_discrete_sdf_gradient(mri_seg, mri_res, display=True):
         # mask_dst = mask.astype(np.float32)
         
         mask_dst = mask_dst_inside - mask_dst_outside
-        from scipy.ndimage.filters import gaussian_filter
-        mask_dst = gaussian_filter(mask_dst, sigma=[3,3,1])
-        # import cv2
-        # import ipdb; ipdb.set_trace()
-        # mask_dst = cv2.GaussianBlur(mask_dst,(5,5),cv2.BORDER_DEFAULT)
 
-        # import ipdb; ipdb.set_trace()   
+        mask_dst = gaussian_filter(mask_dst, sigma=[3,3,1])
+
         gradient = np.gradient(mask_dst, 1,1,10) # list of gradients along each axis (x,y,z)
         
         if display:

@@ -5,12 +5,12 @@ package_directory = os.path.dirname(os.path.abspath(__file__))
 ################## To edit
 # Dataset
 huggingface = True # If True, use huggingface to load the models, otherwise download manually and set the path below
-packaged_data_folder = os.path.join(package_directory, 'dataset') 
+packaged_data_folder = '/home/mkeller2/data2/Data/hit_release/hit_dataset_v1.0/repackaged'
 
 # Trained HIT models
-trained_models_folder = os.path.join(package_directory, 'pretrained')  # folder to save the trained models
-pretrained_male_smpl = os.path.join(package_directory, 'pretrained/pretrained_male_smpl.ckpt') 
-pretrained_female_smpl = os.path.join(package_directory, 'pretrained/pretrained_female_smpl.ckpt')
+trained_models_folder = os.path.join(package_directory, '../pretrained')  # folder to save the trained models
+pretrained_male_smpl = os.path.join(package_directory, '../pretrained/pretrained_male_smpl.ckpt') 
+pretrained_female_smpl = os.path.join(package_directory, '../pretrained/pretrained_female_smpl.ckpt')
                                     
 smplx_models_path = '/is/cluster/fast/mkeller2/Data/body_model/smplx_models' # folder containing the smplx models, to download from https://smpl-x.is.tue.mpg.de/downloads
 

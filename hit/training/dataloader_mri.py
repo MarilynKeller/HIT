@@ -8,20 +8,18 @@ import pickle as pkl
 import sys
 import time
 
-import hit_config as cg
 import numpy as np
 import pyrender
-import smplx
 import torch
 import torch.nn.functional as F
 import tqdm
 import trimesh
-
-from model.mysmpl import MySmpl
-from hit.training.mri_sampling_utils import (compute_discrete_sdf_gradient,
-                                              sample_mri_pts, vis_create_pc)
-from utils.smpl_utils import get_skinning_weights
 from datasets import load_dataset
+
+from hit.model.mysmpl import MySmpl
+from hit.training.mri_sampling_utils import (compute_discrete_sdf_gradient, sample_mri_pts, vis_create_pc)
+from hit.utils.smpl_utils import get_skinning_weights
+import hit.hit_config as cg
 
 # all the MRI will be padded with zero to this size
 MRI_SHAPE = (256, 256, 128) #(512,512,128) for mpi
@@ -354,9 +352,6 @@ class MRIDataset(torch.utils.data.Dataset):
         if force_recache:
             reason = 'force recache set to True in the dataloader'
 
-        smpl_body = smplx.create(**smpl_cfg, model_type='smpl', model_path=cg.smplx_models_path)
-        num_body_joints = smpl_body.NUM_BODY_JOINTS
-
         data_root = cg.packaged_data_folder
 
         paths = get_split_files(data_root, gender, split)
@@ -400,6 +395,7 @@ class MRIDataset(torch.utils.data.Dataset):
             print(f'Loading one subject to create synthetic dataset.')
 
         smpl = MySmpl(model_path=cg.smplx_models_path, gender=smpl_cfg['gender'])
+        num_body_joints = smpl.smpl.NUM_BODY_JOINTS
 
         dataset_list = collections.defaultdict(list)
         print('Loading dataset into memory')
@@ -418,7 +414,7 @@ class MRIDataset(torch.utils.data.Dataset):
 
             # Extract smpl data from the package
             gender = data['gender']
-            betas = torch.Tensor(data['smpl_dict']['betas'][:smpl_body.num_betas])
+            betas = torch.Tensor(data['smpl_dict']['betas'][:smpl.nb_betas])
             pose = torch.Tensor(data['smpl_dict']['pose'])
             trans = torch.Tensor(data['smpl_dict']['trans'])
             verts_free = data['smpl_dict']['verts_free'] - data['smpl_dict']['trans']

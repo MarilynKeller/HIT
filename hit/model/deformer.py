@@ -1,9 +1,9 @@
 import torch
-import torch.nn.functional as F
-from model.broyden import broyden
-from model.helpers import expand_cond, mask_dict
-from model.network import ImplicitNetwork
 from torch import einsum
+import torch.nn.functional as F
+from hit.model.broyden import broyden
+from hit.model.helpers import expand_cond, mask_dict
+from hit.model.network import ImplicitNetwork
 
 
 class ForwardDeformer(torch.nn.Module):

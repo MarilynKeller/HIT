@@ -1,10 +1,7 @@
 import glob
 import os
-
-import hit_config as cg
-
 import wandb
-
+import hit.hit_config as cg
 
 class Exppath:
     
@@ -88,7 +85,7 @@ class Exppath:
         with highest validation loss : model-epoch=0189-val_accuracy=0.758575.ckpt"""
         train_folder = self.find_train_folder()
         ckpt_folder = os.path.join(train_folder, 'ckpts')
-        ckpt_files = glob.glob(os.path.join(ckpt_folder, 'model-*.ckpt'))
+        ckpt_files = glob.glob(os.path.join(ckpt_folder, 'model*.ckpt'))
         if len(ckpt_files) == 0:
             raise ValueError(f'No checkpoint found in {ckpt_folder}')
         key = lambda x: float(x.split('val_accuracy=')[1].split('.ckpt')[0]) # sort the checkpoints files by validation loss  

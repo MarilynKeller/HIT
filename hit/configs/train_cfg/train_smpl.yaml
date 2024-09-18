@@ -1,0 +1,75 @@
+#Defines the architecture of the submodules MLPs
+defaults:
+  - networks: networks
+
+# Maximum number of points that SMPL can evaluate at once (used for marching cube)
+max_queries : 4000000 # Max nb of points passed to the network at once when running marching cube. Decrease if you run out of memory
+
+# Set the training objective
+to_train: 'pretrain' # 'occ', "pretrain", "compression" 
+mri_labels: ['NO', 'LT', 'AT', 'BONE']
+
+# Pretraining
+load_pretrained_lbs : True
+load_pretrained_disp : True
+load_pretrained_compressor : False
+
+# To optimize
+optimize_disp : True
+optimize_occ : True
+optimize_lbs : True
+optimize_compressor : True
+optimize_generator : False
+
+# Root finding algo
+root_init : 9 # or 11 or 13, Number of init root for the root findign algo
+
+
+##################### Losses weights #####################
+lambda_occ : 100 # Weight for the occupancy loss
+lambda_lbs : 100 # Force LBS skinning weights to equal SMPL's on the canonical SMPL vertices
+# unshaping regularization
+lambda_betas : 50 # Force the predicted betas offset to be close to the ground truth betas offset on the SMPL shaped vertices
+lambda_beta0 : 1 # Forces the beta offset to be zero everywhere when beta=[0,0,0,0,0,0,0,0,0,0]
+# Canonical space regularization
+lambda_outcan : 2000 # Forces the predicted occupancy outside the canonical body mesh to be zero
+lambda_hands : 1 # Forces the predicted occupancy in the canonical hands to be LT
+# Compression regularization
+lambda_compression : 10
+lambda_comp0 : 10
+#unused
+lambda_mri : 10 # weight for the mri loss
+lambda_outmri : 10
+lambda_surf : 100 # Forces the predicted occupancy on the surface of the body to have score NO:0]
+lambda_eikonal : 0 # Eikonal loss (untested)
+lambda_linear_beta : 1e3 # Forces the beta disp to be a linear function of beta
+lambda_pose_bs : 0
+lambda_canonicalization : 0
+
+# Losses configuration
+lbs_loss_type : lbs_part_loss # mse, lbs_part_loss, non_zero_loss, cosine_similarity
+comp0_loss_type : bt_lt # bt_lt, bt, norm
+
+#unused
+comp0_out : False
+
+# Learn beta reverse displacement from random betas instead of the MRI betas
+random_beta_disp : False
+
+##################### Architecture #####################
+forward_beta_mlp : False
+compressor: True # Module to undo the stomach compression
+use_generator : False
+pose_bs : False # Use the pose dependant blend shape module
+mri_values : False
+
+
+# Debug
+skip_compression : False
+no_comp_grad : True # Do not propagate the grad in the compression module when applying the decompression
+free_verts : False # Generate renderings with free vertices
+
+# Others
+use_precomputed_dist : False # only used for arch 'mlp'. Needs precompute_dist==True. 
+filter_outside : False # When running marching cube, set points outside the smpl mesh to empty
+smpl_mask : False # Mask the predicted tissue occupancy with SMPL occupancy mask
