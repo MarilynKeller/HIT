@@ -281,7 +281,7 @@ def compute_accuracy(pred_label, gt_label):
 
 def compute_loss_per_part(batch, smpl_body, pred_occ, weight=None, **kwargs):
     # import ipdb; ipdb.set_trace()
-    from utils.smpl_utils import get_skinning_weights_batch
+    # from utils.smpl_utils import get_skinning_weights_batch
     points = batch['can_points']
     part_id = batch['part_id']
     batch_size, n_pts, _ = points.shape

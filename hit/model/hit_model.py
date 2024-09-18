@@ -5,8 +5,10 @@ import torch
 import torch.nn.functional as F
 import trimesh
 from utils.extract_pretrained_gdna import get_state_dict
+from utils.metrics import occ2sdf
+from utils.slice_extractor import SliceLevelSet
 
-from utils.smpl_utils import get_skinning_weights, weights2colors
+from utils.smpl_utils import get_skinning_weights, weights2colors, x_pose_like
 from utils.tensors import cond_create
 from model.deformer import ForwardDeformer, skinning
 from model.helpers import expand_cond
@@ -15,6 +17,7 @@ from model.generator import Generator
 from skimage import measure
 from hit.training.mri_sampling_utils import load_occupancy
 
+from hit.utils.figures import tissue_palette
 
 class HITModel(torch.nn.Module):
 
@@ -77,33 +80,27 @@ class HITModel(torch.nn.Module):
     def initialize(self, pretrained=True, train_cfg = None, device=None, checkpoint_path=None):
         # self = COAPBodyModel(parametric_body, train_cfg)
         gender = self.smpl.gender
-        if pretrained and checkpoint_path is None:
-            model_type = self.model_type
-            checkpoint = f'https://github.com/markomih/COAP/blob/dev/models/coap_{model_type}_{gender}.ckpt?raw=true'
-            state_dict = torch.hub.load_state_dict_from_url(checkpoint, progress=True)
-            self.load_state_dict(state_dict['state_dict'])
-        elif checkpoint_path is not None:
+        
+        if device is not None:
+            self.smpl = self.smpl.to(device=device)
+                
+        if checkpoint_path is not None:
             print('Using checkpoint from ', checkpoint_path)
             checkpoint = checkpoint_path
             state_dict = torch.load(checkpoint)
-            self.load_state_dict(state_dict['state_dict'])    
-        if train_cfg['to_train'] == 'pretrain':
-            pass
-            # parametric_body.hit.network.load_state_dict(get_state_dict(to_extract='network', source='gdna'))
-            # parametric_body.hit.generator.load_state_dict(get_state_dict(to_extract='generator', source='gdna')  )      
-            # self.deformer.disp_network.load_state_dict(get_state_dict(to_extract='deformer.disp_network', source='gdna')) # undo beta
-            # self.deformer.lbs_network.load_state_dict(get_state_dict(to_extract='deformer.lbs_network', source='gdna')) # undo beta
-        else:
-            if train_cfg['load_pretrained_lbs'] == True:
-                self.deformer.lbs_network.load_state_dict(get_state_dict(to_extract='deformer.lbs_network', source=f'pretrained_{gender}')) # undo beta           
-            self.deformer.disp_network.load_state_dict(get_state_dict(to_extract='deformer.disp_network', source=f'pretrained_{gender}')) # undo beta
-            if train_cfg['compressor'] and train_cfg['load_pretrained_compressor'] == True:
-                self.deformer.compressor.load_state_dict(get_state_dict(to_extract='deformer.compressor', source=f'pretrained_compressor_{gender}')) # undo beta
-                self.deformer.compressor.load_state_dict(get_state_dict(to_extract='deformer.compressor', source=f'pretrained_compressor_{gender}')) # undo beta
-            
-            if device is not None:
-                self.smpl = self.smpl.to(device=device)
+            self.load_state_dict(state_dict['state_dict'])   
 
+        else:
+            if train_cfg:
+                print('Loading pretrained weights for the deformer...')
+                if train_cfg['load_pretrained_lbs'] == True:
+                    self.deformer.lbs_network.load_state_dict(get_state_dict(to_extract='deformer.lbs_network', source=f'pretrained_{gender}')) # undo beta           
+                if train_cfg['load_pretrained_disp'] == True:
+                    self.deformer.disp_network.load_state_dict(get_state_dict(to_extract='deformer.disp_network', source=f'pretrained_{gender}')) # undo beta
+                if train_cfg['compressor'] and train_cfg['load_pretrained_compressor'] == True:
+                    self.deformer.compressor.load_state_dict(get_state_dict(to_extract='deformer.compressor', source=f'pretrained_compressor_{gender}')) # undo beta
+                    self.deformer.compressor.load_state_dict(get_state_dict(to_extract='deformer.compressor', source=f'pretrained_compressor_{gender}')) # undo beta
+            
 
     def forward_rigged(self, betas, body_pose=None, global_orient=None, transl=None, do_compress=False, mise_resolution0=32, mise_depth=3, **kwargs):
         
@@ -188,7 +185,7 @@ class HITModel(torch.nn.Module):
             pass
             
             if (self.train_cfg['to_train'] in ['pretrain', 'compression']):
-                occ_smpl_pd = self.network(
+                occ_smpl_pd = self.tissues_occ(
                     pts_c.reshape((n_batch, -1, n_dim)), 
                     cond={'latent': cond['latent']},
                     mask=None,
@@ -283,7 +280,7 @@ class HITModel(torch.nn.Module):
             return x_s
             
                         
-    def query(self, points, smpl_output, part_id=None, skinning_weights=None, is_inside=None, signed_dist=None, ret_intermediate=False, eval_mode=False, template=False, unposed=False, apply_compression=True):
+    def query(self, points, smpl_output, part_id=None, skinning_weights=None, eval_mode=False, template=False, unposed=False, apply_compression=True):
         """
         Args:
             points (torch.tensor): Query points of shape [B,T,3]
@@ -525,7 +522,6 @@ class HITModel(torch.nn.Module):
     def extract_mesh(self, smpl_output, channel=1, grid_res=64, max_queries=None, use_mise=True, mise_resolution0=32,
                      mise_depth=3, batch=None, template=False, unposed=False, color_mode='lbs', bound_by_smpl=False):
         
-
         if max_queries is None:
             max_queries = int(self.train_cfg['max_queries'])
         scale = 1.1  # padding
@@ -537,7 +533,6 @@ class HITModel(torch.nn.Module):
         verts = smpl_output.vertices
         B = verts.shape[0]
         device = verts.device
-        part_colors = self.get_part_colors()
         b_smpl_output_list = self.batchify_smpl_output(smpl_output)
         
         if template == True:
@@ -587,8 +582,7 @@ class HITModel(torch.nn.Module):
                             
                         else:   
                             # import ipdb; ipdb.set_trace() 
-                            output = self.query(pts.to(device=device), b_smpl_output_list[b_ind], 
-                                          ret_intermediate=False, eval_mode=True, 
+                            output = self.query(pts.to(device=device), b_smpl_output_list[b_ind], eval_mode=True, 
                                           template=template, unposed=unposed,
                                           part_id=part_id, skinning_weights=skinning_weights)
                             if channel == -1:
@@ -598,63 +592,13 @@ class HITModel(torch.nn.Module):
                                 pred = output['pred_occ']
                             
                             if len(self.train_cfg.mri_labels) > 1 and channel != -1: 
-                                
-                                import torch.nn.functional as F
-                                occ_all_tissue = F.softmax(pred, dim=-1) 
-                                
-                                # occ_smpl = output['smpl_occ']
-                                # occ_all_tissue = torch.cat((occ_all_tissue, occ_smpl), dim=-1)
-                                
-                                sorted_idx = torch.argsort(occ_all_tissue, dim=-1, descending=True)
-                                                   
-                                best_idx = sorted_idx[:,:,0]
-                                best_non_channel_idx = best_idx
-                                best_non_channel_idx[best_idx==channel] = sorted_idx[:,:,1][best_idx==channel]
-                                
-                                channel_score = occ_all_tissue[..., channel]
-                                best_non_channel_score = occ_all_tissue.gather(-1, best_non_channel_idx.unsqueeze(-1)).squeeze(-1)
-                                
-                                assert (best_non_channel_idx==channel).sum() == 0
-                                occ_tissue = channel_score / (channel_score + best_non_channel_score)
-                                occ = occ_tissue.cpu().squeeze(0)
+                                sdf = occ2sdf(pred, channel)                           
 
                             else:
-                                occ = torch.sigmoid((pred.cpu().squeeze(0)))
-                                
-                            # if bound_by_smpl:
-                            if False:
-                                # import ipdb; ipdb.set_trace()
-                                from leap.tools.libmesh import \
-                                    check_mesh_contains
+                                sdf = torch.sigmoid((pred.cpu().squeeze(0)))
 
-                                # Add normal offset to mesh 
-                                # is_inside = check_mesh_contains(mesh, pts.cpu().numpy()[0]).astype(np.float32)
-                                mesh.vertices = mesh.vertices + mesh.vertex_normals * 0.01
-                                is_inside = check_mesh_contains(mesh, pts.cpu().numpy()[0]).astype(np.float32)
-                                
-                                
-                                occ[is_inside==0] = 0
-                                
-                            # if self.train_cfg['filter_outside']:
-                            if False:
-                                # import ipdb; ipdb.set_trace()
-                                from leap.tools.libmesh import \
-                                    check_mesh_contains
-                                is_inside = check_mesh_contains(mesh, pts.cpu().numpy()[0]).astype(np.float32)
-                                # occ = torch.FloatTensor(is_inside).to(device='cpu') * occ
-                                
-                                smpl_score = torch.sigmoid(output['smpl_occ'].cpu().squeeze(0))
-                                # occ[is_inside==0] = smpl_score[is_inside==0]
-                                import ipdb; ipdb.set_trace()
-                                # occ[is_inside==0] = torch.min(smpl_score, occ)[is_inside==0]
-                                
-                                no_score = occ_all_tissue[..., 0]
-                                C = occ_all_tissue.shape[-1]
-                                corr_score = occ + no_score/(C-1) - (1-smpl_score/(C-1))
-                                
-                            occ_hats.append(occ)
+                            occ_hats.append(sdf)
                     # print('Done.')
-                    
                     values = torch.cat(occ_hats, dim=0).numpy().astype(np.float64)
                     # sample points again
                     mesh_extractor.update(points, values)
@@ -664,19 +608,8 @@ class HITModel(torch.nn.Module):
                 value_grid_list.append(mesh_extractor.to_dense())
             value_grid = np.stack(value_grid_list)
             grid_res = mesh_extractor.resolution
-        else:
-            raise NotImplementedError
-            grid3d = self.create_meshgrid3d(grid_res, grid_res, grid_res)  # range [0,G]
-            grid3d = scale*(grid3d/grid_res - 0.5).reshape(1, -1, 3)  # (1,D*H*W,3) in range [-0.5, +0.5]*scale
-            for grid_queries in torch.split(grid3d, max_queries//B, dim=1):
-                pts = grid_queries.expand(B, -1, -1).to(device)*gt_scale_gpu.unsqueeze(1) + gt_center_gpu.unsqueeze(1)
-                pred = self.query(pts.to(device=device), b_smpl_output_list)
-                occ_tissue = act(F.softmax(pred, dim=-1))
-                occ_tissue = occ_tissue[..., channel]
-                
-                occ_list.append(occ_tissue.cpu())  # B,N
-            value_grid = torch.cat(occ_list, dim=1).reshape(B, grid_res, grid_res, grid_res).numpy()  # B,D,H,W
-
+        
+        
         # extract meshes
         mesh_list = []
         
@@ -693,10 +626,10 @@ class HITModel(torch.nn.Module):
             verts = scale*(verts/(grid_res-1) - 0.5)
             verts = verts*gt_scale[b_ind].item() + gt_center[b_ind].cpu().numpy()
             
+            verts_batched = torch.tensor(verts).to(smpl_output.betas.device).unsqueeze(0)
             if template == True:
                 # color verts 
                 cond = cond_create(betas=smpl_output.betas[0].unsqueeze(0))
-                verts_batched = torch.tensor(verts).to(smpl_output.betas.device).unsqueeze(0)
                 if color_mode == 'compression' and self.train_cfg['compressor']:
                     
                     # Marching cube conmpression
@@ -722,81 +655,111 @@ class HITModel(torch.nn.Module):
 
                 
             else:
-                mesh = trimesh.Trimesh(verts, faces, process=False)
+                # w_pd = self.deformer.query_weights(verts_batched, {'latent': cond['lbs'], 'betas': cond['betas']*0})
+                # cols = weights2colors(w_pd[0].cpu().numpy())
+                cols = tissue_palette[channel]
+                mesh = trimesh.Trimesh(verts, faces, vertex_colors=cols, process=False)
             # color meshes
             # vertex_colors = self.color_points(torch.from_numpy(verts).reshape(1, -1, 3).to(device), b_smpl_output_list[b_ind], max_queries)[0]
             mesh_list.append(mesh)
         return mesh_list
+    
+    @torch.no_grad()
+    def  generate_canonical_mesh(self, batch, channel_index):
+        
+            smpl_data  = {}
+            smpl_data['betas'] = torch.zeros_like(batch['betas'])
+            smpl_data['body_pose'] = x_pose_like(batch['body_pose'])
+            smpl_data['global_orient'] = torch.zeros_like(batch['global_orient'])   
+            smpl_data['transl'] = torch.zeros_like(batch['transl'])
+            smpl_data['global_orient_init'] = torch.zeros_like(batch['global_orient_init'])
+            smpl_output = self.smpl(**smpl_data, return_verts=True, return_full_pose=True)
+
+            meshes = self.extract_mesh(smpl_output, channel=channel_index, use_mise=True, template=True)
+            if len(meshes)>0:
+                return meshes[0] 
+            else:
+                # The mesh extraction failed, return None
+                return None
 
     @torch.no_grad()
-    def color_points(self, pts, smpl_output=None, max_queries=100000):
-        part_colors = self.get_part_colors()
-        K = self.smpl.num_parts
-        B = pts.shape[0]
-        part_colors = part_colors[:K+1]
-        part_colors[-1, :] = 0  # set bg to black
-
-        pts_colors = []
-        for _v in torch.split(pts, max_queries//B, dim=1):
-            output = self.query(_v, smpl_output, ret_intermediate=True, eval_mode=True)
-            part_pred = output['pred_occ'][1]
-            label = part_pred['part_occupancy'].argmax(dim=1)  # B,K,V -> B,V
-            label[part_pred['all_out']] = K  # all mlps say outside
-            inds = label.reshape(-1).cpu().numpy()
-            pts_colors.append(part_colors[inds].reshape((B, -1, 3)))
-
-        pts_colors = np.concatenate(pts_colors, 1)
-        return pts_colors
-
-    @staticmethod
-    def create_meshgrid3d(
-        depth: int,
-        height: int,
-        width: int,
-        device=torch.device('cpu'),
-        dtype=torch.float32,
-    ) -> torch.Tensor:
-        """ Generate a coordinate grid in range [-0.5, 0.5].
-
+    def evaluate_slice(self, batch, smpl_output, z0, axis='z', values=["occ", "sw", "beta", "fwd_beta"], res=0.01):
+        """ 
+        Infer the different values on a slice of the 3D space
         Args:
-            depth (int): grid dim
-            height (int): grid dim
-            width (int): grid dim
-        Return:
-            grid tensor with shape :math:`(1, D, H, W, 3)`.
+            batch : dict containing the input smpl parameters
+            smpl_output : the output of the SMPL model
+            z0 : the z coordinate of the slice
+            axis : the axis of the slice
+            values : the values to infer on the slice, can contain :
+                "occ" (occupancy) 
+                "sw" (skinning weights)
+            res : the size of a slice pixel (in meters) 
+        Returns:
+            out_images : list of pillow images of the different values
         """
-        xs = torch.linspace(0, width, width, device=device, dtype=dtype)
-        ys = torch.linspace(0, height, height, device=device, dtype=dtype)
-        zs = torch.linspace(0, depth, depth, device=device, dtype=dtype)
-        return torch.stack(torch.meshgrid([xs, ys, zs]), dim=-1).unsqueeze(0)  # 1xDxHxWx3
-
-
-    @staticmethod
-    def get_part_colors():
-        return np.array([
-            [ 8.94117647e-01,  1.01960784e-01,  1.09803922e-01],
-            [ 2.15686275e-01,  4.94117647e-01,  7.21568627e-01],
-            [ 3.01960784e-01,  6.86274510e-01,  2.90196078e-01],
-            [ 5.96078431e-01,  3.05882353e-01,  6.39215686e-01],
-            [ 1.00000000e+00,  4.98039216e-01,  3.58602037e-16],
-            [ 1.00000000e+00,  1.00000000e+00,  2.00000000e-01],
-            [ 6.50980392e-01,  3.37254902e-01,  1.56862745e-01],
-            [ 9.68627451e-01,  5.05882353e-01,  7.49019608e-01],
-            [ 6.00000000e-01,  6.00000000e-01,  6.00000000e-01],
-            [ 1.00000000e+00,  9.17647059e-01,  8.47058824e-01],
-            [ 4.94117647e-01, -3.58602037e-16,  1.84313725e-01],
-            [ 7.92156863e-01,  7.29411765e-01,  3.72549020e-01],
-            [ 5.25490196e-01,  4.78431373e-01,  3.58602037e-16],
-            [ 9.29411765e-01,  6.50980392e-01,  5.76470588e-01],
-            [ 5.05882353e-01,  4.03921569e-01,  4.15686275e-01],
-            [ 7.80392157e-01,  3.56862745e-01,  4.43137255e-01],
-            [ 6.86274510e-01,  5.37254902e-01,  3.52941176e-01],
-            [ 6.27450980e-01,  8.23529412e-02,  0.00000000e+00],
-            [ 1.00000000e+00,  4.35294118e-01,  3.80392157e-01],
-            [ 7.37254902e-01, -7.17204074e-16,  2.82352941e-01],
-            [ 1.00000000e+00,  9.09803922e-01,  5.52941176e-01],
-            [ 1.00000000e+00,  7.84313725e-02,  4.15686275e-01],
-            [ 7.72549020e-01,  7.52941176e-01,  6.66666667e-01],
-            [ 5.68627451e-01,  2.62745098e-01,  2.98039216e-01],
-            [ 0,  0,  0],
-        ])
+    
+        sl = SliceLevelSet(nbins=10, xbounds=[-0.2,0.2], ybounds=[-0.2,0.2], z_bounds=[-0.2, 0.2], res=res)
+        
+        xc = sl.gen_slice_points(z0=z0, axis=axis)
+        xc_batch = torch.FloatTensor(xc).to(batch['betas'].device).unsqueeze(0).expand(batch['betas'].shape[0], -1, -1)
+        cond = cond_create(batch['betas'], batch['body_pose'], self.generator)
+        
+        occ = None
+        if "occ" in values:
+            # Query HIT
+            output = self.query(xc_batch, smpl_output, unposed=True, eval_mode=True)
+            
+            # Gather all values to monitor
+            pts_c = output['pts_c']
+            sw = output['weights']
+            occ = output['pred_occ']
+            # disp = self.deformer.disp_network(xc_batch, cond)   
+            if 'beta' in values:
+                disp = self.deformer.disp_network(xc_batch, cond)    
+            if "comp" in values:
+                comp = self.deformer.compressor(xc_batch, cond)
+        else:
+            
+            if "sw" in values:
+                sw = self.deformer.query_weights(xc_batch, cond={})
+            if "beta" in values:
+                disp = self.deformer.query_betadisp(xc_batch, cond = {'betas': cond['betas']})
+                
+        if "fwd_beta" in values:
+            B_flat = self.fwd_beta(xc_batch, cond)
+            B_xc = B_flat.view(B_flat.shape[0],xc_batch.shape[1],10,3)
+            beta_rep = batch['betas'].repeat(xc_batch.shape[1], 1).reshape(-1,1,10)
+            B_xc_concat = B_xc.reshape(-1, 10, 3) # B*N, 10, 3
+            fwd_disp_flat = torch.bmm(beta_rep, B_xc_concat) # B*N, 1, 3
+            fwd_disp = fwd_disp_flat.view(-1, xc_batch.shape[1], 3) # B, N, 3
+                
+        # import ipdb; ipdb.set_trace()
+        out_images = []
+        for value in values:
+            if value == "occ":
+                image = sl.plot_occupancy(occ)
+                out_images.append(image)
+                
+            elif value == 'sw':
+                image = sl.plot_skinning_weights(sw, occ)
+                out_images.append(image)
+                
+            elif value == 'beta':
+                image = sl.plot_disp_field(disp, occ, quiver=True)
+                out_images.append(image)
+                
+            elif value == 'fwd_beta':
+                image = sl.plot_disp_field(fwd_disp, occ, quiver=True)
+                out_images.append(image)
+                
+            elif value == 'comp':
+                image = sl.plot_disp_field(comp, occ, quiver=True, is_compression=True)
+                out_images.append(image)
+                
+            else:
+                print(f"Value {value} not recognized")
+                
+        return out_images
+            
+     

@@ -54,6 +54,9 @@ def broyden(g, x_init, J_inv_init, max_steps=50, cvg_thresh=1e-5, dvg_thresh=1, 
         ids_opt = gx_norm < gx_norm_opt
         gx_norm_opt[ids_opt] = gx_norm.clone().detach()[ids_opt]
         x_opt[ids_opt] = x.clone().detach()[ids_opt]
+        
+        if torch.isnan(x_opt).any():
+            import ipdb; ipdb.set_trace()
 
         # exclude converged and diverged points from furture iterations
         ids_val = (gx_norm_opt > cvg_thresh) & (gx_norm < dvg_thresh)

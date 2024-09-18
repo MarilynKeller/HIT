@@ -9,6 +9,10 @@ hydra:
 lr: 0.0001
 batch_size: 8
 num_workers: 12
+adam_beta1 : 0.9
+adam_beta2 : 0.999
+
+gradient_clip_val : None #10000
 
 checkpoint_every_n_epochs: 10
 ckpt_path: None
@@ -22,6 +26,11 @@ export_canmeshes_every_n_epochs: 20
 
 use_scheduler : False
 weight_decay_compressor : 0.001
+weight_decay_disp : 0.001
+weight_decay_fwd_beta : 0.001
+weight_decay_lbs : 0.1
+
+seed_everything : 0 # -1 or seed
 
 # Set the training objective
 overfit_style : posed # 'template', 'unposed', posed, only considered if self.data_cfg.subjects != 'all'
@@ -32,14 +41,17 @@ visuals_only: False
 eval_export_visuals: False
 slices : False # Export slices when tested
 
+print_grad_clip : False
+
 defaults:
-  - train_cfg: train
+  - train_cfg: train_hit
 
 smpl_cfg:
   gender: 'male'
   num_betas: 10
 
 data_cfg:
+  huggingface : False   # use HIT dataset from huggingface
  
   # Data caching
   force_recache : False # Force recaching of the dataset
@@ -50,7 +62,7 @@ data_cfg:
   subjects : 'all' # 'lowest_b1', 'all' 'first' "two" Lowest_b1 is the largerst subject (max beta1)
   # Synthetic SMPL subjects
   synthetic: False
-  synt_style: random # random_per_joint ,random
+  synt_style: random # random_per_joint ,random, fixed
 
   # Data processing
   filter_LT: True # Process the LT mask with an opening to remove the skin layer
@@ -84,8 +96,9 @@ trainer:
   check_val_every_n_epoch: 10
   num_sanity_val_steps: 0
   log_every_n_steps: 1
-  max_epochs: 1000
-  gradient_clip_val : 0.5
-  accumulate_grad_batches: 1
+  max_epochs: 1500
+  # gradient_clip_val : 0.5
+  # accumulate_grad_batches: 1
+  detect_anomaly: True
   
 

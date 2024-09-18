@@ -36,6 +36,8 @@ def compute_occupancy_loss(hit_pl, batch, pred_occ):
         occ_loss = F.cross_entropy(input = pred_occ.reshape(-1, pred_occ.shape[-1]),  # (BxT, 4)
                             target = batch['mri_occ'].long().reshape(-1),  # (BxT)
                             weight = weight)
+        
+    occ_loss = hit_pl.train_cfg.lambda_occ * occ_loss
     hit_pl.log("train/loss_occ", occ_loss)
     
     # Add per part occupancy loss (volumetric)
@@ -45,6 +47,90 @@ def compute_occupancy_loss(hit_pl, batch, pred_occ):
                 
     return occ_loss
 
+
+def compute_beta_disp_loss(hit_pl, batch, batch_idx, cond, step, train_cfg):
+    """Force the beta dislacement field to yield the same displacement as the SMPL model"""
+    
+    if train_cfg.random_beta_disp:
+        betas = (torch.rand(batch['betas'].shape).to(hit_pl.device)-0.5) * 4
+        cond = cond_create(betas)
+    else:
+        betas = batch['betas']
+    
+    v_s = hit_pl.smpl.forward_canonical(betas).vertices # Vertex on the shaped mesh   
+    v_c = hit_pl.smpl.forward_canonical(torch.zeros_like(betas)).vertices # Vertex on the canonical mesh
+    # v_c_pred = hit_pl.hit.deformer.query_cano(v_s, {'betas': cond['betas']}, apply_pose_bs=False)
+    disp = hit_pl.hit.deformer.query_betadisp(v_s, cond)
+    # import ipdb; ipdb.set_trace()
+    v_c_pred = v_s + disp
+    
+    beta_loss = F.mse_loss(v_c_pred*100, v_c*100) # We pass the metric values in cm for better numerical stability
+    
+    # Per part loss for cannonical loss is not volumetric
+    # part_loss = metrics.compute_loss_per_part_p2p(smpl_canonical_pred*100, smpl_canonical_gt*100, loss_type='canonical', part_ids=hit_pl.smpl.part_ids) 
+    # for part in part_loss:
+    #     wandb.log({f"Per Part beta disp loss/{part}": part_loss[part]})    
+    if hit_pl.current_epoch %hit_pl.cfg.export_canmeshes_every_n_epochs == 0 and step == 'train':
+        mesh = hit_pl.smpl.psm(v_c_pred,  display=False)
+        mesh_path = mpimesh2glb(mesh)
+        wandb.log({f"train_can_space/unshape_pred": wandb.Object3D(mesh_path)})
+        
+        mesh = hit_pl.smpl.psm(v_c, v_c-v_c_pred, maxval=0.05, display=False)
+        mesh_path = mpimesh2glb(mesh)
+        wandb.log({f"train_can_space/beta_disp_with_pred_error": wandb.Object3D(mesh_path)})
+         
+    # import ipdb; ipdb.set_trace()
+    beta_loss = hit_pl.train_cfg.lambda_betas * beta_loss
+    hit_pl.log(f"{step}/beta_loss", beta_loss)
+    return beta_loss
+
+    # wandb.log({"train/can_surf_pts": wandb.Object3D(pts_c_surface[0].detach().cpu().numpy())})
+    # wandb.log({"train/target_can_surf_pts": wandb.Object3D(smpl_template_verts[0].detach().cpu().numpy())})
+    
+def Bdense_loss(x_s, x_c, B_xc, beta):
+    
+    fwd_disp = torch.matmul(B_xc.transpose(-2,-1), beta.unsqueeze(1).repeat(1,x_c.shape[1], 1).unsqueeze(-1)).squeeze(-1) # B, N, 3
+    
+    # beta_rep = beta.repeat(x_c.shape[1], 1).reshape(-1,1,10) # Repeat the betas for each point (B*N,1, 10)
+    # B_xc_concat = B_xc.reshape(-1, 10, 3) # B*N, 10, 3
+    # fwd_disp_flat = torch.bmm(beta_rep, B_xc_concat) # B*N, 1, 3
+    # fwd_disp = fwd_disp_flat.view(-1, x_c.shape[1], 3) # B, N, 3
+    # import ipdb; ipdb.set_trace()
+    linear_beta_loss = F.mse_loss(x_s - x_c, fwd_disp)
+    return linear_beta_loss
+    
+ 
+def compute_linear_beta_loss(hit_pl, batch, cond, smpl_output, pts_c_inside, on_surface=False):
+    # Enforce disp linearity wrt beta  
+    
+    # shaped_verts = hit_pl.smpl.forward_canonical(cond['betas']).vertices
+    
+    # x_s = torch.rand(batch['betas'].shape[0], 6000, 3).to(hit_pl.device)*2-1
+    # disp = hit_pl.hit.deformer.query_betadisp(x_s, cond)
+    # x_c = x_s + disp
+    
+    with torch.no_grad():
+        if on_surface:
+            x_s = hit_pl.smpl.forward_canonical(batch['betas']).vertices
+            x_c =  hit_pl.smpl.forward_canonical(torch.zeros_like(batch['betas'])).vertices
+
+        else:
+            x_m = batch['mri_points'] 
+            x_c = pts_c_inside
+            x_s = hit_pl.hit.canonicalize_from_similar(x_m, x_c, smpl_output.tfs, cond, undo_shape=False)
+            # x_c = hit_pl.hit.canonicalize_from_similar(pts_p, pts_c, smpl_output.tfs, cond, undo_shape=True)
+
+    # We want to enforce the displacement to be a linear function of beta: xb-xc = beta * B(xc)
+    # import ipdb; ipdb.set_trace()
+    B_flat = hit_pl.hit.fwd_beta(x_c, cond) # note that fwd_beta is not conditioned on anything
+    B_xc = B_flat.view(B_flat.shape[0],x_c.shape[1],10,3) # B, N, 10, 3 The  predicted local B vector in x_c
+    
+    linear_beta_loss = Bdense_loss(x_s, x_c, B_xc, batch['betas']) # Forces the displacement to be a linear function of beta
+    
+    linear_beta_loss = hit_pl.train_cfg.lambda_linear_beta * linear_beta_loss
+    hit_pl.log("train/linear_beta_loss", linear_beta_loss)
+    return linear_beta_loss
+    
 
 def pose_bs_loss(hit_pl, batch, batch_idx, cond):
         
@@ -125,24 +211,26 @@ def compute_outside_can_loss(hit_pl, smpl_output, batch, batch_idx):
         outside_can_mask = torch.logical_not(batch['can_occ'])
           
     uniform_can_pts_pred = hit_pl.forward(batch, pts_c_uniform, template=True)['pred_occ']
+    uniform_can_pts_pred = F.softmax(uniform_can_pts_pred, dim=-1)[...,0]
     # WARN: Is this what you want to do
     nb_pts_outside = outside_can_mask.sum()
     
     assert nb_pts_outside > 0, "There should be points outside the canonical space"
     
-    gt_outside_cc = torch.zeros(nb_pts_outside).to(uniform_can_pts_pred.device) # The class of all those points should be zero
-    loss_outside_can = F.cross_entropy(uniform_can_pts_pred[outside_can_mask], gt_outside_cc.long())
+    gt_outside_cc = torch.ones(nb_pts_outside).to(uniform_can_pts_pred.device) # The class of all those points should be zero
+    # import ipdb; ipdb.set_trace()
+    loss_outside_can = F.mse_loss(uniform_can_pts_pred[outside_can_mask], gt_outside_cc)
     
     
-    if hit_pl.current_epoch %hit_pl.cfg.export_canmeshes_every_n_epochs == 0:
-        # list points predicted outside the canonical space
-        B = pts_c_uniform.shape[0]
+    # if hit_pl.current_epoch %hit_pl.cfg.export_canmeshes_every_n_epochs == 0:
+    #     # list points predicted outside the canonical space
+    #     B = pts_c_uniform.shape[0]
 
-        pred = torch.softmax(uniform_can_pts_pred, dim=-1) #B, T, C
-        pred_tissue = pred.argmax(dim=-1)
-        pred_mask = torch.where(pred_tissue == 0)
-        outside = pts_c_uniform[pred_mask][0::B]
-        wandb.log({"train_can_space/can_surf_pts": wandb.Object3D(outside.detach().cpu().numpy())})
+    #     pred = torch.softmax(uniform_can_pts_pred, dim=-1) #B, T, C
+    #     pred_tissue = pred.argmax(dim=-1)
+    #     pred_mask = torch.where(pred_tissue == 0)
+    #     outside = pts_c_uniform[pred_mask][0::B]
+        # wandb.log({"train_can_space/can_surf_pts": wandb.Object3D(outside.detach().cpu().numpy())})
         
     loss_outside_can = hit_pl.train_cfg.lambda_outcan * loss_outside_can
     hit_pl.log("train/loss_outside_can", loss_outside_can)
@@ -167,160 +255,75 @@ def compute_hands_loss(hit_pl, batch):
     return loss_hands
             
             
-def compute_compression_loss(hit_pl, batch, batch_idx, smpl_output):
-          
-        cond = cond_create(batch['betas']) 
-
+def compute_compression_loss(hit_pl, batch, batch_idx, smpl_output, cond, step='train'):
 
         smpl_template_verts = get_template_verts(batch, hit_pl.smpl)
-        # m0 = Mesh(v=smpl_template_verts[0].detach().cpu().numpy(), f=hit_pl.smpl.faces)
-        # m0.write_ply('/tmp/comp_mesh.ply')
+        smpl_tfs = smpl_output.tfs
         
-        #-----------------------new approach
         xv_p = batch['body_verts']
         xf_p = batch['body_verts_free']
+             
+        xf_s = hit_pl.hit.canonicalize_from_similar(xf_p, smpl_template_verts, smpl_tfs, cond, undo_shape=False)
+        # xf_c = hit_pl.hit.canonicalize_from_similar(xf_p, smpl_template_verts, smpl_tfs, cond, undo_shape=False)
+        xv_s = hit_pl.smpl.forward_canonical(batch['betas']).vertices # Vertex on the shaped mesh   
+        # compute shaped on
         
-        xv_c = smpl_template_verts
-        smpl_tfs = smpl_output.tfs #get_gdna_bone_transfo(smpl, smpl_output)
-        xf_c = hit_pl.hit.canonicalize_from_similar(xf_p, xv_c, smpl_tfs, cond)
+        d = xv_p - xf_p # Ground truth decompression offset
+        d_pred = hit_pl.hit.deformer.compressor(xf_s, cond) # Predicted decompression offset
         
-        #--------------- canonical compression
-        # d = xv_c - xf_c
-        # d_pred = hit_pl.hit.deformer.compressor(xf_c, cond) 
-        
-        #------------------ posed
-        # d = xv_p - xf_p
-        # d_pred = hit_pl.hit.deformer.compressor(xf_c, cond)
-        
-        #------------------ posed shape
-        d = xv_p - xf_p
-        xf_s = hit_pl.hit.canonicalize_from_similar(xf_p, xf_c, smpl_tfs, cond, undo_shape=False)
-        d_pred = hit_pl.hit.deformer.compressor(xf_s, cond)
-        
-        if hit_pl.current_epoch %hit_pl.cfg.export_canmeshes_every_n_epochs == 0:
-            mesh = hit_pl.smpl.psm(xf_s, d_pred, maxval=0.08, norm=False, display=False)
-            mesh_path = mpimesh2glb(mesh)
-            wandb.log({f"train_can_space/shape_space_compression": wandb.Object3D(mesh_path)})
-            
-            mesh = hit_pl.smpl.psm(xf_p+d_pred, display=False)
-            mesh_path = mpimesh2glb(mesh)
-            wandb.log({f"train_can_space/uncompressed_body": wandb.Object3D(mesh_path)})
-            
-            mesh = hit_pl.smpl.psm(xf_s, d, maxval=0.08, norm=False, display=False)
-            mesh_path = mpimesh2glb(mesh)
-            wandb.log({f"gt_can_space/shape_space_compression": wandb.Object3D(mesh_path)})
-            
-            mesh = hit_pl.smpl.psm(xv_p, d-d_pred, maxval=0.08, norm=False, display=False)
-            mesh_path = mpimesh2glb(mesh)
-            wandb.log({f"gt_can_space/uncompressed_body_with_error": wandb.Object3D(mesh_path)})
-
-        
-        # xv_p_pred = xf_p + d_pred
-        # xv_c_pred = hit_pl.hit.canonicalize_from_similar(xv_p, xf_c, smpl_tfs, cond)
-        
-        # output = hit_pl.forward(batch, xf_p, eval_mode=True, use_part_id=False)
-        
-        
-        # pts = batch['mri_points']  
-        # d_inside = hit_pl.hit.deformer.compressor(xf_c, cond)
-        
-        #---------------- endnew approach
-        
-        # ---------------------------old approach
-        # d_pred = hit_pl.hit.deformer.compressor(smpl_template_verts, cond) 
-        # d =  batch['body_verts_free'] - batch['body_verts']
-        # ---------------------------end old approach
-        
-        # Export meshes
-        # si = 1
-        # disp_max = 0.08
-        # for x, name in zip([xv_p, xf_p, xf_s, xv_c, xf_c], ['xv_p', 'xf_p', 'xf_s', 'xv_c', 'xf_c']):
-        # # for x, name in zip([xv_p, xf_p, xv_c, xf_c], ['xv_p', 'xf_p', 'xv_c', 'xf_c']):
-        #     for color in ['pred', 'gt']:
-        #         if color == 'pred':
-        #             vc = d_pred[si].abs().detach().cpu().numpy() / disp_max
-        #         else: 
-        #             vc = d[si].abs().detach().cpu().numpy() / disp_max
-        #             # vc = (batch['body_verts'] - batch['body_verts_free'])[si].abs().detach().cpu().numpy() / disp_max
-        #             # m = Mesh(v=x[0].detach().cpu().numpy(), f=hit_pl.smpl.faces, vc=vc)
-        #         m = Mesh(v=x[si].detach().cpu().numpy(), f=hit_pl.smpl.faces, vc=vc)
-        #         m.write_ply(f'output/meshes_compression/{si}/{name}_{color}.ply')
-        #         print(f"Exported {name}_{color}")
-        
-        def compression_loss_metric(d, d_pred, loss_fct_comp):
-            
-            for i in range(3):
-                print(f"d range for dim {i}: min={d[...,i].min():.3f}, max={d[...,i].max():.3f}")
-                di_max = d[...,i].max()
-                di_min = d[...,i].min()
-            
-        # Convert to mm
-        d = d * 1000
-        d_pred = d_pred * 1000
-         
         vi = 3504 #vertex index on the belly
     
         loss_fct_comp = torch.nn.MSELoss()
-        # d_pred = d + 20
+        
+        # Convert to mm for more meaningful loss
+        d = d * 1000
+        d_pred = d_pred * 1000
+        
         loss_compression = loss_fct_comp(d_pred, d)
-        # loss_compression = loss_fct_comp(d_pred, smpl_template_verts)
-        # loss_compression = ((hit_pl.hit.deformer.compressor(smpl_template_verts, cond)  - 20)**2).mean()
-        # return loss 
+        
+        if step == 'train':
+            hit_pl.log("train/d_err_belly", ((torch.abs(d_pred-d)[:,vi])).mean())
+                                       
+        elif step == 'val':
+            
+            hit_pl.log("val_compression/loss", loss_compression)
+            hit_pl.log("val_compression/d_err_belly", ((torch.abs(d_pred-d)[:,vi])).mean())
+            hit_pl.log("val_compression/d_err_max", torch.linalg.norm(d_pred-d, axis=-1).max())
+        
+            # Log meshes
+            if hit_pl.current_epoch % hit_pl.cfg.export_canmeshes_every_n_epochs == 0:
+                mesh = hit_pl.smpl.psm(xv_s, d_pred, maxval=0.08, norm=False, display=False)
+                mesh_path = mpimesh2glb(mesh)
+                wandb.log({f"train_can_space/shape_space_compression": wandb.Object3D(mesh_path)})
+                
+                mesh = hit_pl.smpl.psm(xf_p+d_pred, display=False)
+                mesh_path = mpimesh2glb(mesh)
+                wandb.log({f"train_can_space/uncompressed_body": wandb.Object3D(mesh_path)})
+                
+                mesh = hit_pl.smpl.psm(xv_s, d, maxval=0.08, norm=False, display=False)
+                mesh_path = mpimesh2glb(mesh)
+                wandb.log({f"gt_can_space/shape_space_compression": wandb.Object3D(mesh_path)})
+                
+                mesh = hit_pl.smpl.psm(xv_p, d-d_pred, maxval=0.08, norm=False, display=False)
+                mesh_path = mpimesh2glb(mesh)
+                wandb.log({f"gt_can_space/uncompressed_body_with_error": wandb.Object3D(mesh_path)})
+        
+            
 
-        
-        # print(loss_compression.item())
+        # def compression_loss_metric(d, d_pred, loss_fct_comp):
+            
+        #     for i in range(3):
+        #         print(f"d range for dim {i}: min={d[...,i].min():.3f}, max={d[...,i].max():.3f}")
+        #         di_max = d[...,i].max()
+        #         di_min = d[...,i].min()
 
-        hit_pl.log("train_trackers/d_err_belly", ((torch.abs(d_pred-d)[:,vi])).mean())
-        # hit_pl.log("train/d_err_max", torch.linalg.norm(d_pred-d, axis=-1).max())
-        
-        # Per part losses in wandb
-        # ==============================================================================
-        # Per part loss for cannonical loss is not volumetric
-        # part_loss = metrics.compute_loss_per_part_p2p(d_pred, d, loss_type='compression', part_ids=hit_pl.smpl.part_ids) 
-        # # TODO: wandb logging
-        # for part in part_loss:
-        #     wandb.log({f"Per Part compression loss/{part}": part_loss[part]})
-        # ==============================================================================        
-            # return loss
-    
-        # if self.train_cfg['can_free_loss']  > 0:s
-        #     surf_output = self.forward(batch, batch['body_verts_free'], template=False, eval_mode=False)
-        #     surf_can = surf_output['pts_c']
-        #     loss_can_free = F.mse_loss(surf_can, smpl_template_verts)
-        #     # loss_can_free = torch.linalg.norm(surf_can, smpl_template_verts)
-        #     loss = loss + self.train_cfg['can_free_loss'] * loss_can_free
-        #     self.log("train/can_free_loss", loss_can_free)
-        
-        loss_compression = hit_pl.train_cfg['lambda_compression'] * loss_compression
-        hit_pl.log("train/compression_loss", loss_compression)
+         
+        loss_compression = hit_pl.train_cfg.lambda_compression * loss_compression
+        hit_pl.log(f"{step}/compression_loss", loss_compression)
        
         return loss_compression
     
-    
-def compute_linear_beta_loss(hit_pl, batch, cond, pts_c_inside):
-    # Attempt to enforce disp linearity wrt beta  
-    
-    shaped_verts = hit_pl.smpl.forward_canonical(cond['betas']).vertices
-      
-    pred_disp = hit_pl.hit.deformer.disp_network(pts_c_inside, cond)
-    can_verts = shaped_verts+pred_disp
-    
-    fwd_disp_coeff = hit_pl.hit.fwd_beta(can_verts, cond)
-    fwd_disp_coeff = fwd_disp_coeff.view(fwd_disp_coeff.shape[0],fwd_disp_coeff.shape[1],10,3)
-    fwd_disp_vect = torch.matmul(fwd_disp_coeff, can_verts.reshape(4, -1, 3, 1))
-    fwd_disp = cond['betas'].unsqueeze(1).unsqueeze(-1) * fwd_disp_coeff
-    
-    #mse loss
-    linear_beta_loss = F.mse_loss(fwd_disp, pred_disp)
-    return linear_beta_loss
-    
-    # def disp_fct(x, betas):
-    #     cond['betas'] = betas
-    #     pred_disp = hit_pl.hit.deformer.disp_network(x, cond)
-    #     return pred_disp.sum()
-    #     import ipdb ; ipdb.set_trace()
-    #     lx = torch.diagonal(hessian(disp_fct, (pts_c_inside, cond['betas'])))  
-   
+
    
 def compute_lbs_regularization_loss(hit_pl, batch, batch_idx, cond, step='train'):
     """ Forces the lbs to be equal to those of SMPL on the skin surface""" 
@@ -335,7 +338,7 @@ def compute_lbs_regularization_loss(hit_pl, batch, batch_idx, cond, step='train'
     
     pred_weights = hit_pl.hit.deformer.query_weights(smpl_template_verts, {'latent': cond['lbs']})
 
-    if hit_pl.current_epoch %hit_pl.cfg.export_canmeshes_every_n_epochs == 0 and step == 'train':
+    if (hit_pl.current_epoch % hit_pl.cfg.export_canmeshes_every_n_epochs) == 0 and step == 'train':
         mesh = hit_pl.smpl.psm(smpl_template_verts, skin_weights=pred_weights, display=False)
         mesh_path = mpimesh2glb(mesh)
         wandb.log({f"train_can_space/can_lbs": wandb.Object3D(mesh_path)})
@@ -352,6 +355,8 @@ def compute_lbs_regularization_loss(hit_pl, batch, batch_idx, cond, step='train'
     # mse loss
     if hit_pl.train_cfg['lbs_loss_type'] == 'mse':
         lbs_loss = F.mse_loss(pred_weights, gt_weights)
+    elif hit_pl.train_cfg['lbs_loss_type'] == 'cosine_similarity':
+        lbs_loss = 1 - F.cosine_similarity(pred_weights, gt_weights, dim=-1).mean()
     elif hit_pl.train_cfg['lbs_loss_type'] == 'lbs_part_loss':
         # Write explicit loss
         # pred_weights is of shape BxNxK, where K is the number of parts. Compute the error for each part and take the mean
@@ -370,38 +375,6 @@ def compute_lbs_regularization_loss(hit_pl, batch, batch_idx, cond, step='train'
     return lbs_loss
     
 
-def compute_beta_disp_loss(hit_pl, batch, batch_idx, cond, step='train'):
-    """Force the beta dislacement field to yield the same displacement as the SMPL model"""
-    
-    smpl_canonical_shaped_verts = hit_pl.smpl.forward_canonical(batch['betas']).vertices
-    
-    smpl_canonical_gt = hit_pl.smpl.forward_canonical(torch.zeros_like(batch['betas'])).vertices
-    smpl_canonical_pred = hit_pl.hit.deformer.query_cano(smpl_canonical_shaped_verts, {'betas': cond['betas']}, apply_pose_bs=False)
-    
-    beta_loss = F.mse_loss(smpl_canonical_pred*100, smpl_canonical_gt*100) # We pass the metric values in cm for better numerical stability
-    
-    # Per part loss for cannonical loss is not volumetric
-    # part_loss = metrics.compute_loss_per_part_p2p(smpl_canonical_pred*100, smpl_canonical_gt*100, loss_type='canonical', part_ids=hit_pl.smpl.part_ids) 
-    # for part in part_loss:
-    #     wandb.log({f"Per Part beta disp loss/{part}": part_loss[part]})
-            
-    if hit_pl.current_epoch %hit_pl.cfg.export_canmeshes_every_n_epochs == 0 and step == 'train':
-        mesh = hit_pl.smpl.psm(smpl_canonical_pred,  display=False)
-        mesh_path = mpimesh2glb(mesh)
-        wandb.log({f"train_can_space/unshape_pred": wandb.Object3D(mesh_path)})
-        
-        mesh = hit_pl.smpl.psm(smpl_canonical_gt, smpl_canonical_gt-smpl_canonical_pred, maxval=0.05, display=False)
-        mesh_path = mpimesh2glb(mesh)
-        wandb.log({f"gt_can_space/beta_disp_with_pred_error": wandb.Object3D(mesh_path)})
-         
-    # import ipdb; ipdb.set_trace()
-    beta_loss = hit_pl.train_cfg.lambda_betas * beta_loss
-    hit_pl.log(f"{step}/beta_loss", beta_loss)
-    return beta_loss
-
-    # wandb.log({"train/can_surf_pts": wandb.Object3D(pts_c_surface[0].detach().cpu().numpy())})
-    # wandb.log({"train/target_can_surf_pts": wandb.Object3D(smpl_template_verts[0].detach().cpu().numpy())})
-    
     
 def compute_smooth_loss(hit_pl, batch, pts_c_inside):
     raise DeprecationWarning("This is deprecated, check first if you use")
@@ -438,7 +411,7 @@ def compute_beta0_loss(hit_pl, batch, batch_idx, cond):
 def compute_surface_loss(hit_pl, batch, batch_idx, cond):
     """ Forces the occupancy of NO to be of 0.5% on the surface of the SMPL mesh"""
     
-    smpl_can_verts = hit_pl.smpl.forward_canonical(torch.zeros_like(cond['betas'])).vertices
+    smpl_can_verts = hit_pl.smpl.forward_canonical(torch.zeros_like(batch['betas'])).vertices
     
     pred_occ = hit_pl.forward(batch, smpl_can_verts, template=True)['pred_occ']
     pred_occ_NO = torch.softmax(pred_occ, dim=-1)[...,0] # softmax over the tissues, then take the first channel value (NO)
@@ -469,6 +442,8 @@ def compute_comp0_loss(hit_pl, batch, batch_idx, smpl_output, cond, pts_c, occ_p
     # compression_prediction
     d_pred = hit_pl.hit.deformer.compressor(xf_s, cond)
     
+    d_pred = d_pred * 100 # Convert to cm for better numerical stability
+    
     # Use gt prediction
     bone_mask = batch['mri_occ'] == 3
     lt_mask = batch['mri_occ'] == 1
@@ -478,19 +453,18 @@ def compute_comp0_loss(hit_pl, batch, batch_idx, smpl_output, cond, pts_c, occ_p
     # bone_mask = torch.softmax(occ_pred).argmax(dim=-1) == 3
     # lt_mask = torch.softmax(occ_pred).argmax(dim=-1) == 1
     
+    bone_comp_loss = F.mse_loss(d_pred[bone_mask], torch.zeros_like(d_pred[bone_mask])) # Convert to cm with *100 for better numerical stability
+    lt_comp_loss = F.mse_loss(d_pred[lt_mask], torch.zeros_like(d_pred[lt_mask])) # Convert to cm with *100 for better numerical stability
+    
     if hit_pl.train_cfg['comp0_loss_type'] == 'bt_lt':
-        rigid_tissue_mask = bone_mask | lt_mask
+        comp0_loss = bone_comp_loss + 0.2*lt_comp_loss
     elif hit_pl.train_cfg['comp0_loss_type'] == 'bt':
-        rigid_tissue_mask = bone_mask
+        comp0_loss = bone_comp_loss 
+    elif hit_pl.train_cfg['comp0_loss_type'] == 'norm': # Just force the compression to be small
+        comp0_loss = F.mse_loss(d_pred, torch.zeros_like(d_pred))
     else:
         raise ValueError(f"Unknown comp0 loss type {hit_pl.train_cfg['comp0_loss_type']}, should be 'bt_lt' or 'bt'")
     
-    # if hit_pl.train_cfg['comp0_out']:
-    #     body_mask = batch['body_mask'].bool()
-    #     rigid_tissue_mask = rigid_tissue_mask | ~body_mask
-    
-    comp0_loss = F.mse_loss(d_pred[rigid_tissue_mask]*100, torch.zeros_like(d_pred[rigid_tissue_mask])) # Convert to cm with *100 for better numerical stability
-   
     if hit_pl.train_cfg['comp0_out']:
         # To fix. This id not that easy
         raise NotImplementedError("This is not implemented yet")
@@ -556,3 +530,24 @@ def compute_mri_loss(hit_pl, batch, batch_idx, smpl_output, cond, pts_c_inside):
     return total_mri_loss
 
     
+def compute_canonicalization_loss(hit_pl, batch, batch_idx, smpl_output, cond, step='train'):
+
+        # Get templte body surface
+        xc = get_template_verts(batch, hit_pl.smpl)
+        smpl_tfs = smpl_output.tfs
+        
+        # Get canonicalized body surface
+        xf_p = batch['body_verts_free']         
+        xf_c = hit_pl.hit.deformer.query_cano(xf_p, {'betas': cond['betas'],'thetas': cond['thetas']}) 
+        
+        # Convert to mm for more meaningful loss
+        xf_c = xf_c * 1000
+        xc = xc * 1000
+        
+        loss_fct = torch.nn.MSELoss()
+        loss_canonicalization = loss_fct(xf_c, xc)
+  
+        loss_canonicalization = hit_pl.train_cfg.lambda_canonicalization * loss_canonicalization
+        hit_pl.log(f"{step}/canonicalization_loss", loss_canonicalization)
+       
+        return loss_canonicalization

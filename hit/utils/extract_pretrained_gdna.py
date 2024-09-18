@@ -6,24 +6,13 @@ import hit.hit_config as cg
 def get_state_dict(to_extract = 'deformer', source=None):
     
     assert source is not None, 'Please specify source'
-    assert source in ['gdna', 'pretrained_male', 'pretrained_female', 'pretrained_compressor_male', 'pretrained_compressor_female'], f'Unknown source {source}'
+    assert source in ['pretrained_male', 'pretrained_female'], f'Unknown source {source}'
 
-    root = os.getcwd() 
-    if source == 'gdna':
-        path = os.path.join(root, '../../Data/gDNA_pretrained/pretrained/renderpeople/last.ckpt')
-    elif source == 'pretrained_male':
+    root = os.getcwd() #'/home/mkeller2/data2/Code/hit/learning/pretrained/'
+    if source == 'pretrained_male':
         path = cg.pretrained_male_smpl
     elif source == 'pretrained_female':
         path = cg.pretrained_female_smpl
-    elif source == 'pretrained_compressor_male':
-        path = os.path.join(cg.trained_models_folder, 'cf/ckpts/last.ckpt') #global shapespace
-    elif source == 'pretrained_compressor_female':
-        path = os.path.join(cg.trained_models_folder, 'cfm/ckpts/last.ckpt')
-        
-
-        
-
-
     else:
         raise NotImplementedError
 

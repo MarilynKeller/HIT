@@ -91,14 +91,12 @@ class Exppath:
         ckpt_files = glob.glob(os.path.join(ckpt_folder, 'model-*.ckpt'))
         if len(ckpt_files) == 0:
             raise ValueError(f'No checkpoint found in {ckpt_folder}')
-        key = lambda x: float(x.split('val_accuracy=')[1].split('.ckpt')[0]) # sort the checkpoints files by validation loss
-        # import ipdb; ipdb.set_trace()   
+        key = lambda x: float(x.split('val_accuracy=')[1].split('.ckpt')[0]) # sort the checkpoints files by validation loss  
         checkpoint = sorted(ckpt_files, key=key)[-1] # Take the checkpoint with the highest validation loss
         return checkpoint
     
 
     def get_last_checkpoint(self):
-        # import ipdb; ipdb.set_trace()
         train_folder = self.find_train_folder()
         ckpt_folder = os.path.join(train_folder, 'ckpts')
         ckpt_files = glob.glob(os.path.join(ckpt_folder, 'last.ckpt'))

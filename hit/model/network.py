@@ -4,7 +4,157 @@ import numpy as np
 import torch
 import torch.nn as nn
 from model.helpers import expand_cond, grid_sample_feat, mask_dict
+import torchvision
 
+class MySoftplus(nn.Softplus):
+    
+    def __init__(self, beta=100, threshold=20, **kwargs):
+        super(MySoftplus, self).__init__(beta=beta, threshold=threshold)
+
+        
+    
+
+class ImplicitNetworkNew(nn.Module):
+    def __init__(
+            self,
+            d_in,
+            d_out,
+            width,
+            depth,
+            geometric_init=True,
+            bias=1.0,
+            skip_in=-1,
+            mask=False,
+            weight_norm=True,
+            multires=0,
+            pose_cond_layer=-1,
+            pose_cond_dim=-1,
+            pose_embed_dim=-1,
+            shape_cond_layer=-1,
+            shape_cond_dim=-1,
+            shape_embed_dim=-1,
+            latent_cond_layer=-1,
+            latent_cond_dim=-1,
+            latent_embed_dim=-1,
+            feat_cond_dim=0,
+            feat_cond_layer=[],
+            dropout = 0,
+            **kwargs):
+        """
+        Initializes the Occupancy Network with MLP from torchvision.
+
+        Args:
+            d_in (int): Input dimensionality.
+            d_hidden (int): Hidden layer dimensionality.
+            d_out (int): Output dimensionality.
+            n_layers (int): Number of hidden layers.
+            use_batchnorm (bool): Whether to use batch normalization.
+        """
+        super().__init__()
+        self.multires = multires
+        self.cond_labels = [] 
+        use_batchnorm = weight_norm
+        
+        # import ipdb; ipdb.set_trace()
+        d_input = d_in
+        if multires > 0:
+            # Change the input dimensionality to account for positional encoding
+            d_input = d_in + d_in * 2 * multires
+            
+        # Add conditional inputs size to the input dimensionality
+        if len(pose_cond_layer) > 0:
+            d_input += pose_cond_dim
+            self.cond_labels.append('thetas')
+        if len(shape_cond_layer) > 0:
+            d_input += shape_cond_dim
+            self.cond_labels.append('betas')
+        if len(latent_cond_layer) > 0:
+            d_input += latent_cond_dim
+            self.cond_labels.append('latent')
+
+        # Creating the MLP layers
+        self.mlp = torchvision.ops.MLP(
+            in_channels=d_input,
+            hidden_channels=[width] * depth,
+            activation_layer=MySoftplus, # Should be nn.Softplus(beta=100) but not working
+            norm_layer=nn.BatchNorm1d if use_batchnorm else None,
+            dropout=dropout,
+        )
+        
+        # Output layer
+        self.output_layer = nn.Linear(width, d_out)
+        # self.output_activation = nn.Softplus(beta=100)  # Assuming the output is a probability
+        
+        # Apply geometric initialization if specified
+        if geometric_init:
+            self.apply(self._geometric_init)
+
+    def _geometric_init(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.normal_(m.weight,  mean=0, std=0.01)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        
+        
+    def forward(self, x, cond, **kwargs):
+        #TODO clean the arguments
+        """
+        Forward pass through the network.
+
+        Args:
+            x (tensor): Input tensor.
+
+        Returns:
+            tensor: Output of the network.
+        """
+        # import ipdb; ipdb.set_trace()
+        
+        cond = {key:cond[key] for key in cond if key in self.cond_labels}
+        
+        input_dim = x.ndim
+        if input_dim == 3:
+            # Bring the input to 2D and propagate the conditional input to have the same size
+            try:
+                n_batch, n_point, n_dim = x.shape     
+                mask = torch.ones( (n_batch, n_point), device=x.device, dtype=torch.bool)                     
+                cond = { key:expand_cond(cond[key], x) for key in cond if key in self.cond_labels if key is not None}
+                cond = mask_dict(cond, mask)
+                x = x[mask]
+                
+            except Exception as e:
+                print(f'Error in forward pass of ImplicitNetwork: {e}')
+                import ipdb; ipdb.set_trace()
+        
+        # if 'betas' in self.cond_labels:
+        #     import ipdb; ipdb.set_trace()
+        if self.multires > 0:
+            x = self.pos_encoding(x, self.multires)
+            
+        #append conditional information
+        for key, val in cond.items():
+            if key in self.cond_labels:
+                    x = torch.cat([x, val], -1)
+        
+        x = self.mlp(x)
+        x = self.output_layer(x)
+        # x = self.output_activation(x)
+              
+        if input_dim == 3:
+            # Bring the output back to 3D
+            x_full = torch.ones( (n_batch, n_point, x.shape[-1]), device=x.device)
+            x_full[mask] = x
+            x = x_full
+            
+        return x
+
+    def pos_encoding(self, p, L):
+        out = [p]
+
+        for i in range(L):
+            out.append(torch.sin(2**i*p))
+            out.append(torch.cos(2**i*p))
+
+        return torch.cat(out, 1)
 
 class ImplicitNetwork(nn.Module):
     def __init__(
@@ -29,6 +179,7 @@ class ImplicitNetwork(nn.Module):
             latent_embed_dim=-1,
             feat_cond_dim=0,
             feat_cond_layer=[],
+            dropout = 0,
             **kwargs
     ):
         super().__init__()
@@ -38,6 +189,8 @@ class ImplicitNetwork(nn.Module):
             embed_fn, input_ch = get_embedder(multires)
             self.embed_fn = embed_fn
             dims[0] = input_ch
+            
+        self.dropout = dropout
 
         self.cond_names = []
 
@@ -91,7 +244,10 @@ class ImplicitNetwork(nn.Module):
                 input_dim += self.feat_cond_dim
 
             lin = nn.Linear(input_dim, out_dim)
-
+            
+            dp =  nn.Dropout(p=self.dropout)
+            setattr(self, "dp" + str(l), dp)
+            
             if geometric_init:
                 if l == self.num_layers - 2:
                     torch.nn.init.normal_(lin.weight, mean=-np.sqrt(np.pi) / np.sqrt(input_dim), std=0.0001)
@@ -114,7 +270,9 @@ class ImplicitNetwork(nn.Module):
                 lin = nn.utils.weight_norm(lin)
 
             setattr(self, "lin" + str(l), lin)
-        self.softplus = nn.Softplus(beta=100)
+        self.activation = nn.Softplus(beta=100)
+        # self.activation = nn.Softplus(beta=1)
+        # self.activation = nn.LeakyReLU()
 
     def forward(self, input, cond, input_feat=None,  mask=None, return_feat=False, spatial_feat=False, val_pad=0, normalize=False):
         
@@ -180,9 +338,13 @@ class ImplicitNetwork(nn.Module):
                 x = torch.cat([x, input_embed], dim=-1) / np.sqrt(2)
 
             x = lin(x)
+            
+            if self.dropout!=0:
+                dp = getattr(self, "dp" + str(l))
+                x = dp(x)
 
             if l < self.num_layers - 2:
-                x = self.softplus(x)
+                x = self.activation(x)
                 if return_feat:
                     feat = x.clone()
 
@@ -195,6 +357,10 @@ class ImplicitNetwork(nn.Module):
                 feat_full = torch.ones( (n_batch, n_point, feat.shape[-1]), device=x.device) * val_pad
                 feat_full[mask] = feat
                 feat = feat_full
+                
+        if x.isnan().any():
+            print('NAN in forward pass')
+            import ipdb; ipdb.set_trace()
                 
         if return_feat:
             return x, feat

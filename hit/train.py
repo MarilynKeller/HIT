@@ -1,20 +1,18 @@
+import socket
+print(f"Running on machine {socket.gethostname()}")
 
 import glob
 import os
-import pathlib
 import pickle
 import hydra
 import numpy as np
 import pytorch_lightning as pl
-import smplx
 import torch
 import tqdm
-import trimesh
+from training.logging import log_canonical_meshes, log_slices
 import yaml
-from training.losses import *
 import wandb
 
-from matplotlib import pyplot as plt
 from model.mysmpl import MySmpl
 from omegaconf import OmegaConf
 from skimage.io import imsave
@@ -23,16 +21,13 @@ from hit.model.hit_model import HITModel
 import hit.hit_config as cg
 import hit.training.metrics as metrics
 from hit.training.losses import *
-from hit.utils.experiments import col_at, col_bn, col_lt, col_no
-from hit.utils.smpl_utils import get_template_verts, x_pose_like
 from hit.utils.tensors import cond_create
-from hit.utils.slice_extractor import SliceLevelSet
 from hit.training.dataloader_mri import MRI_SHAPE, MRIDataset
 from hit.utils.renderer import Renderer
 
 
 class HITTraining(pl.LightningModule):
-    def __init__(self, cfg):
+    def __init__(self, cfg, checkpoint_fct=None):
         super().__init__()
         self.cfg = cfg
         self.smpl_cfg = cfg.smpl_cfg
@@ -65,19 +60,22 @@ class HITTraining(pl.LightningModule):
         
         print(self.hit.tissues_occ) 
         
+        if cfg.seed_everything > -1:
+            pl.seed_everything(cfg.seed_everything)
+        
 
     def configure_optimizers(self):
         
-        params_to_optimize = []
         
-        if self.train_cfg['forward_beta_mlp']:
-            params_to_optimize.append({'params' : self.hit.fwd_beta.parameters()})
             
         if self.train_cfg['to_train'] == 'occ':
+            params_to_optimize = []
+            if self.train_cfg['forward_beta_mlp']:
+                params_to_optimize.append({'params' : self.hit.fwd_beta.parameters(), 'weight_decay':self.cfg['weight_decay_fwd_beta']})
             if self.train_cfg['optimize_occ']:
                 params_to_optimize.append({'params' : self.hit.tissues_occ.parameters()})
             if self.train_cfg['optimize_disp']:
-                params_to_optimize.append({'params' : self.hit.deformer.disp_network.parameters()})
+                params_to_optimize.append({'params' : self.hit.deformer.disp_network.parameters(), 'weight_decay':self.cfg['weight_decay_disp']})
             if self.train_cfg['pose_bs']:
                 params_to_optimize.append({'params' : self.hit.deformer.pose_bs.parameters()})
             if self.train_cfg['optimize_compressor'] and self.train_cfg['compressor']:
@@ -85,16 +83,16 @@ class HITTraining(pl.LightningModule):
             if self.train_cfg['optimize_generator']:
                 params_to_optimize.append({'params' : self.hit.generator.parameters()})
             if self.train_cfg['optimize_lbs']:
-                params_to_optimize.append({'params' : self.hit.deformer.lbs_network.parameters()})
-            # @varora
-            # add mri network parameters for optimizer
+                params_to_optimize.append({'params' : self.hit.deformer.lbs_network.parameters(), 'weight_decay':self.cfg['weight_decay_lbs']})
             if self.train_cfg['mri_values']:
                 params_to_optimize.append({'params': self.hit.mri_val_net.parameters()})
 
         elif self.train_cfg['to_train'] == 'pretrain':
             params_to_optimize = []
-            params_to_optimize.append({'params' : self.hit.deformer.disp_network.parameters()})
-            params_to_optimize.append({'params' : self.hit.deformer.lbs_network.parameters()})
+            if self.train_cfg['forward_beta_mlp']:
+                params_to_optimize.append({'params' : self.hit.fwd_beta.parameters()})
+            params_to_optimize.append({'params' : self.hit.deformer.disp_network.parameters(), 'weight_decay':self.cfg['weight_decay_disp']})
+            params_to_optimize.append({'params' : self.hit.deformer.lbs_network.parameters(), 'weight_decay':self.cfg['weight_decay_lbs']})
             if self.train_cfg['pose_bs']:
                 params_to_optimize.append({'params' : self.hit.deformer.pose_bs.parameters()})
             
@@ -103,8 +101,8 @@ class HITTraining(pl.LightningModule):
         else:
             raise NotImplementedError(f"Unknown training mode {self.train_cfg['to_train']}")
 
-        optimizer = torch.optim.Adam(params_to_optimize, lr=self.cfg.lr)
-        # return optimizer
+        optimizer = torch.optim.Adam(params_to_optimize, lr=self.cfg.lr, betas=(self.cfg.adam_beta1, self.cfg.adam_beta2))
+
         if self.train_cfg['to_train'] == 'compression':
             monitor_value = 'train/compression_loss'
             return optimizer
@@ -137,60 +135,64 @@ class HITTraining(pl.LightningModule):
         return torch.utils.data.DataLoader(mri_dataset, drop_last=True,
             num_workers=self.cfg.num_workers, batch_size=self.cfg['batch_size'], pin_memory=False, shuffle=False)
         
-
     def test_dataloader(self):
-        # return self.val_dataloader()
-        # print(f"*********WARNING: using val dataset for test")
         return torch.utils.data.DataLoader(MRIDataset.from_config(self.smpl_cfg, self.data_cfg, self.train_cfg, split='test'), drop_last=True,
             num_workers=0, batch_size=1, pin_memory=False, shuffle=False)
         
     # def on_before_optimizer_step(self, optimizer, optimizer_idx):
     #     # Compute the 2-norm for each layer
     #     # If using mixed precision, the gradients are already unscaled here
-    #     norms = pl.utilities.grad_norm(optimizer.
+    #     norms = pl.utilities.grad_norm(optimizer, norm_type=2)
     #     self.log_dict(norms)
+    
 
-
-    def forward(self, batch, points, eval_mode=False, cond=None, unposed=False, template = False, 
-                only_near_smpl=False, use_part_id=False):
+    def forward(self, batch, points, eval_mode=False, cond=None, unposed=False, template=False, use_part_id=False):
             
-            smpl_output = self.smpl(**batch, return_verts=True, return_full_pose=True)
-            # smpl_output.v_shaped = batch['v_shaped']
-            # smpl_output.v_free = batch['body_verts']
-            # smpl_output.n_free = batch['body_normals']
-            
-            if use_part_id:
-                part_id = batch['part_id']
-                skinning_weights = batch['skinning_weights']
-            else:
-                part_id=None
-                skinning_weights=None
-            #
+        """ Forward pass of the HIT model
         
-                
-            # if self.train_cfg.get('use_precomputed_dist', 'False') is True:
-            #     return self.hit.query(points, smpl_output, 
-            #                                     is_inside=batch['is_inside'], 
-            #                                     signed_dist=batch['signed_dist'],canonical=True)
-            # else:
-            return self.hit.query(points,
-                                   smpl_output, 
-                                   part_id=part_id, 
-                                   skinning_weights=skinning_weights, 
-                                   eval_mode=eval_mode, 
-                                   template=template,
-                                   unposed=unposed)
+        Args:
+            batch (dict): Dictionary containing the input smpl parameters
+            points (torch.tensor): Query points to evaluate of shape [B,T,3]
+            eval_mode (bool): If True, the model is in evaluation mode
+            cond: Dictionary to condition the submodules MLPs
+            unposed: If True, the model will infer the tissues for the body provided in the batch in the canonical X pose
+            template: If True, the model will infer the tissues for the template body (average shape, canonical pose)
+            use_part_id (bool): If True, the model will load the skinning weight of the query points from the batch. Set to False if they are not available.  
+        """     
+           
+        smpl_output = self.smpl(**batch, return_verts=True, return_full_pose=True)
+        
+        if use_part_id:
+            part_id = batch['part_id']
+            skinning_weights = batch['skinning_weights']
+        else:
+            part_id=None
+            skinning_weights=None
+        
+        # Print the current step
+        # print(f"step={self.global_step:05d}")
+        # if self.global_step == 10470:
+        #     print("Last step before the bug")
+        #     import ipdb; ipdb.set_trace()
+        output = self.hit.query(points,
+                                smpl_output, 
+                                part_id=part_id, 
+                                skinning_weights=skinning_weights, 
+                                eval_mode=eval_mode, 
+                                template=template,
+                                unposed=unposed)
+        return output
  
  
     def pretraining_step(self, batch, batch_idx):
         
         cond = cond_create(batch['betas'], batch['body_pose'], smpl=self.smpl)
-        # smpl_output = self.smpl(**batch, return_verts=True, return_full_pose=True) 
+        smpl_output = self.smpl(**batch, return_verts=True, return_full_pose=True) 
         
         loss = 0
         # Beta disp loss     
         if self.train_cfg.lambda_betas > 0:
-            beta_loss = compute_beta_disp_loss(self, batch, batch_idx, cond)
+            beta_loss = compute_beta_disp_loss(self, batch, batch_idx, cond, 'train', self.train_cfg)
             loss = loss + beta_loss
             
         # if self.train_cfg.lambda_beta0 > 0:
@@ -203,7 +205,29 @@ class HITTraining(pl.LightningModule):
             
         if self.train_cfg['lambda_pose_bs'] > 0 and self.train_cfg['pose_bs']: 
             loss_pose_bs = pose_bs_loss(self, batch, batch_idx, cond)
-            loss = loss + loss_pose_bs 
+            loss = loss + loss_pose_bs    
+         
+        if self.train_cfg['forward_beta_mlp']:
+            x_c = get_template_verts(batch, self.smpl)
+            linear_beta_loss = compute_linear_beta_loss(self, batch, cond, smpl_output, x_c, on_surface=True)
+            loss = loss + linear_beta_loss
+        
+
+        # Log gradient norms
+        nan_grad = False
+        for name, param in self.named_parameters():
+            if param.grad is not None:
+                self.log(f'gradient/grad_norm_{name}', param.grad.norm(), on_step=True, on_epoch=False)
+                # check if isNan
+                param_norm = param.grad.norm()
+                if torch.isnan(param_norm):
+                    import ipdb; ipdb.set_trace()
+                    nan_grad = True
+                    # import ipdb; ipdb.set_trace()
+        
+        if nan_grad:
+            self.checkpoint_fct('grad_nan')
+               
             
         return loss
            
@@ -244,33 +268,33 @@ class HITTraining(pl.LightningModule):
         # ------------------------------- SMPL surface losses
         
         if self.train_cfg['lambda_compression'] > 0 and self.train_cfg['compressor'] and self.train_cfg['optimize_compressor']:
-            loss_compression = compute_compression_loss(self, batch, batch_idx, smpl_output)
+            loss_compression = compute_compression_loss(self, batch, batch_idx, smpl_output, cond)
             loss = loss + loss_compression
-            
-        if self.train_cfg['to_train'] == 'compression':
-            return loss_compression
-            
+
         # Beta disp loss     
         if self.train_cfg.lambda_betas > 0:
-            beta_loss = compute_beta_disp_loss(self, batch, batch_idx, cond)
+            beta_loss = compute_beta_disp_loss(self, batch, batch_idx, cond, 'train', self.train_cfg)
             loss = loss + beta_loss
            
         if self.train_cfg.lambda_surf > 0:
             surf_loss = compute_surface_loss(self, batch, batch_idx, cond) 
             loss = loss + surf_loss    
             
-
-
+        if self.train_cfg.lambda_canonicalization > 0:
+            # compute_canonicalization_loss
+            canonicalization_loss = compute_canonicalization_loss(self, batch, batch_idx, smpl_output, cond)
+            loss = loss + canonicalization_loss
+            
         # ------------------------------- Inside points losses
         
-        pts = batch['mri_points']  
-        pts.requires_grad_()
+        x_f = batch['mri_points']  
+        x_f.requires_grad_()
         n_points = batch['mri_occ'].shape[0] * batch['mri_occ'].shape[1] # = B*T
         
         # Pass inside points
-        output = self.forward(batch, pts, unposed=unposed, template=template, use_part_id=True)
+        output = self.forward(batch, x_f, unposed=unposed, template=template, use_part_id=True)
         pred_occ = output['pred_occ']
-        pts_c_inside = output['pts_c']
+        x_c = output['pts_c']
         # wandb.log({"train/can_inside_pts": wandb.Object3D(pts_c_inside[0].detach().cpu().numpy())})
         
         # Occupancy loss
@@ -283,9 +307,9 @@ class HITTraining(pl.LightningModule):
             beta0_loss = compute_beta0_loss(self, batch, batch_idx, cond)
             loss = loss + beta0_loss       
          
-        if self.train_cfg['forward_beta_mlp'] and self.train_cfg['forward_beta_mlp']:
-            linear_beta_loss = compute_linear_beta_loss(self, batch, cond, pts_c_inside)
-            loss = loss + self.train_cfg['lambda_linear_beta'] * linear_beta_loss
+        if self.train_cfg['forward_beta_mlp']:
+            linear_beta_loss = compute_linear_beta_loss(self, batch, cond, smpl_output, x_c)
+            loss = loss + linear_beta_loss
                  
         
         if self.train_cfg['lambda_pose_bs'] > 0 and self.train_cfg['pose_bs']: 
@@ -305,18 +329,16 @@ class HITTraining(pl.LightningModule):
             loss = loss + lbs_loss
             
         if self.train_cfg['lambda_comp0'] > 0 and self.train_cfg['compressor'] and self.train_cfg['optimize_compressor']:
-            comp0_loss = compute_comp0_loss(self, batch, batch_idx, smpl_output, cond, pts_c_inside, pred_occ)
+            comp0_loss = compute_comp0_loss(self, batch, batch_idx, smpl_output, cond, x_c, pred_occ)
             loss = loss + comp0_loss
 
-        # @varora
         if self.train_cfg['mri_values'] > 0:
-            mri_loss = compute_mri_loss(self, batch, batch_idx, smpl_output, cond, pts_c_inside)
+            mri_loss = compute_mri_loss(self, batch, batch_idx, smpl_output, cond, x_c)
             loss = loss + mri_loss
-         
-            
+                 
         # Eikonal loss - untested
         if self.train_cfg.lambda_eikonal > 0:
-            smooth_loss = compute_smooth_loss(batch, pts_c_inside)
+            smooth_loss = compute_smooth_loss(batch, x_c)
             loss = loss + smooth_loss
            
         # Accuracy 
@@ -342,181 +364,108 @@ class HITTraining(pl.LightningModule):
             #         print(f"\tClass {ci}: {ni} points")
             
         self.log("train/loss", loss)
-        return loss
-
-
-    def pretraining_validation_step(self, batch, batch_idx):
         
-        cond = cond_create(batch['betas'], batch['body_pose'])
-        # smpl_output = self.smpl(**batch, return_verts=True, return_full_pose=True) 
-        
-        loss = 0
-        # Beta disp loss     
-        if self.train_cfg.lambda_betas > 0:
-            beta_loss = compute_beta_disp_loss(self, batch, batch_idx, cond, step='val')
-            loss = loss + beta_loss
-            
-        # if self.train_cfg.lambda_beta0 > 0:
-        #     beta0_loss = compute_beta0_loss(self, batch, batch_idx, cond)
-        #     loss = loss + beta0_loss  
-            
-        if self.train_cfg['lambda_lbs'] > 0 and self.train_cfg['optimize_lbs']:
-            lbs_loss = compute_lbs_regularization_loss(self, batch, batch_idx, cond, step='val')
-            loss = loss + lbs_loss
-            
+        for name, param in self.named_parameters():
+            if param.grad is not None:
+                self.log(f'gradient/grad_norm_{name}', param.grad.norm(), on_step=True, on_epoch=False)
+                
+        if loss.isnan():
+            print("NAN in loss")
+            import ipdb; ipdb.set_trace()
+
+        # if self.global_step == 10430:
+        #     print("Last 2 step before the bug")
+        #     import ipdb; ipdb.set_trace()
         return loss
+    
+    # def on_after_backward(self):
+    #     print('After backward')
+    #     max_grad = max([param.grad.abs().max() for  name, param in self.named_parameters() if param.grad is not None])
+    #     print(f"Max grad: {max_grad}")
+
+    def on_before_optimizer_step(self, optimizer, optimizer_idx):
+        if self.cfg.print_grad_clip:
+            # print('Before optimizer step')
+            max_grad = max([param.grad.abs().max() for  name, param in self.named_parameters() if param.grad is not None])
+            print(f"Step {self.global_step:05d} - Max grad: {max_grad}")
+        
+        # torch.nn.utils.clip_grad_norm_(self.hit.parameters(), 10000) #cfg.clip_grad_norm
+        # max_grad = max([param.grad.abs().max() for  name, param in self.named_parameters() if param.grad is not None])
+        # print(f'\tAfter norm clipping:  {max_grad}')
+        if self.cfg.gradient_clip_val is not None:
+            torch.nn.utils.clip_grad_value_(self.hit.parameters(), 100)
+            if self.cfg.print_grad_clip:
+                max_grad = max([param.grad.abs().max() for  name, param in self.named_parameters() if param.grad is not None])
+                print(f'\tAfter value clipping:  {max_grad}')
+
 
     def validation_step(self, batch, batch_idx):
-        # If the dataset visualization flag is enabled 
-        if self.cfg['render_dataset']:
-            self.export_visuals(batch, batch['seq_names'], split="val")
-            return
-        
+
         if self.train_cfg['to_train'] == 'pretrain':
-            return self.pretraining_validation_step(batch, batch_idx)
+                    
+            cond = cond_create(batch['betas'], batch['body_pose'])
+            
+            # Log slices
+            slice_values = ["sw", "beta"]
+            if self.cfg.train_cfg['forward_beta_mlp']:
+                slice_values.append("fwd_beta")
+            log_slices(self, batch, values=slice_values) #betas   
+
+            loss = 0
+            # Beta disp loss     
+            if self.train_cfg.lambda_betas > 0:
+                beta_loss = compute_beta_disp_loss(self, batch, batch_idx, cond, step='val', train_cfg=self.train_cfg)
+                loss = loss + beta_loss
+                
+            # if self.train_cfg.lambda_beta0 > 0:
+            #     beta0_loss = compute_beta0_loss(self, batch, batch_idx, cond)
+            #     loss = loss + beta0_loss  
+                
+            if self.train_cfg['lambda_lbs'] > 0 and self.train_cfg['optimize_lbs']:
+                lbs_loss = compute_lbs_regularization_loss(self, batch, batch_idx, cond, step='val')
+                loss = loss + lbs_loss
+                
+            return loss
         
- 
         if self.train_cfg['to_train'] == 'compression': 
             smpl_output = self.smpl(**batch, return_verts=True, return_full_pose=True)
-            # set to zero for testing
-            cond = cond_create(batch['betas']) 
-  
-            smpl_template_verts = get_template_verts(batch, self.smpl)
+            loss = compute_compression_loss(self, batch, batch_idx, smpl_output, cond, step='val')
+            return loss
             
-            xv_p = batch['body_verts']
-            xf_p = batch['body_verts_free']
+        elif self.train_cfg['to_train'] == 'occ':
             
-            # Global learned in xf_c
-            # xv_c = smpl_template_verts
-            # smpl_tfs = get_gdna_bone_transfo(smpl, smpl_output)
-            # xf_c = self.hit.canonicalize_from_similar(xf_p, xv_c, smpl_tfs, cond)
-            
-            # d = xv_p - xf_p
-            # d_pred = self.hit.deformer.compressor(xf_c, cond) 
-            
-            # Global learned in xf_s
-            xv_c = smpl_template_verts
-            smpl_tfs = smpl_output.tfs #get_gdna_bone_transfo(smpl, smpl_output)
-            xf_s = self.hit.canonicalize_from_similar(xf_p, xv_c, smpl_tfs, cond, undo_shape=False)
-            
-            d = xv_p - xf_p
-            d_pred = self.hit.deformer.compressor(xf_s, cond)   
-
-            # Convert to mm
-            # TODO make a nice weighted loss using clamp
-            d = d * 1000
-            d_pred = d_pred * 1000
-            vi = 3504 #vertex index on the belly
-            loss_fct_comp = torch.nn.MSELoss()
-            loss_compression = loss_fct_comp(d_pred, d)
-            self.log("compression_val/loss", loss_compression)
-            self.log("compression_val/d_err_belly", ((torch.abs(d_pred-d)[:,vi])).mean())
-            self.log("compression_val/d_err_max", torch.linalg.norm(d_pred-d, axis=-1).max())
-            
-        else:    
+            # Compute the occupancy loss for the validation set
             val_metric = self.compute_val_loss(batch)
+            
+            # Log the metrics
             for key, val in val_metric.items():
                 if 'part' in key: # Log the per part dice score in another panel
                     self.log(f"val_part/{key}", val, sync_dist=True)
                 else:
                     self.log(f"val/{key}", val, sync_dist=True)
-                    
-            if batch_idx > 0:# extract and render meshes for the first batch only
-                return 
         
-        
-            smpl_output = self.smpl(**batch, return_verts=True, return_full_pose=True)
-        
-            #self.conf.train_cfg['build_val_meshes_every_n_epochs']-1:
-            # Evaluate disp fielf
-            sl = SliceLevelSet()
-            # sl_comp = SliceLevelSet(res=0.01) # Use a lower resolution for 
-            for z0 in [-0.2, -0.4, 0, 0.3] :#np.linspace(-0.4,0.3,3):
-      
-                xc = sl.gen_slice_points(z0=z0)
-                xc_batch = torch.FloatTensor(xc).to(self.device).unsqueeze(0).expand(batch['betas'].shape[0], -1, -1)
-                
-                output = self.hit.query(xc_batch, smpl_output, unposed=True, eval_mode=True)
-                cond = cond_create(batch['betas'], batch['body_pose'], self.hit.generator)
-                disp = self.hit.deformer.disp_network(xc_batch, cond)
-                
-                pts_c = output['pts_c']
-                weights = output['weights']
-                occ = output['pred_occ']
-                
-                
-                if len(self.train_cfg.mri_labels) > 1 and not self.train_cfg['to_train'] in ['pretrain', 'compression']:
-                    occ = torch.softmax(occ, -1)
-                    occ = torch.argmax(occ, -1)
-                else:
-                    occ = torch.sigmoid(occ)
-                    
-                values_np = occ.detach().cpu().numpy()[0]
-                disp_np = disp.detach().cpu().numpy()[0]
-                
-                # value = np.linalg.norm(value, axis=-1) 
- 
-                if not self.train_cfg['to_train'] == 'compression':      
-                    sl.plot_slice_levelset(disp_np, values=values_np, to_plot=False)
-                    im_path = os.path.join('/tmp', f'disp_{z0:.2f}.png')
-                    plt.savefig(im_path)
-                    plt.close()
-                    print(f'Saved disp image to {im_path}')  
-                    wandb.log({f"slices_disp/disp_{z0}": wandb.Image(im_path)})
-                
-                if self.train_cfg['compressor']:
-                    d = self.hit.deformer.compressor(xc_batch, cond_create(torch.zeros_like(batch['betas'])))
-                    d_np = d.detach().cpu().numpy()[0]
-                    sl.plot_slice_levelset(d_np, values=d_np, to_plot=False, iscompression=True)
-                    im_path = os.path.join('/tmp', f'compression_{z0:.2f}.png')
-                    plt.savefig(im_path)
-                    plt.close()
-                    print(f'Saved disp image to {im_path}')  
-                    wandb.log({f"slices_comp/compression_{z0}": wandb.Image(im_path)})
-                
-                # log image in wandb
-                
-            # Reconstruct occupancy of the canonical space
-            try:
-            # if True:
-                for li in self.train_cfg.mri_labels:
-                    if li == 'NO':
-                        continue
-                    else:
-                        channel_index = self.train_cfg['mri_labels'].index(li)
-                    can_mesh = self.generate_canonical_mesh(batch, channel_index)
-                    can_mesh_path = os.path.join(self.logger.save_dir, 'val', 'can_mesh.glb')
-                    os.makedirs(os.path.dirname(can_mesh_path), exist_ok=True)
-                    can_mesh.export(can_mesh_path)
-                    wandb.log({f"val_image/can_mesh_{li}": wandb.Object3D(can_mesh_path)})
-            except Exception as e:
-                print(f"Could not generate canonical mesh: {e}")
+            # Log evaluation on slices
+            slice_values = ["occ", "sw", "beta", "comp"]
+            if self.cfg.train_cfg['forward_beta_mlp']:
+                slice_values.append("fwd_beta")
+            log_slices(self, batch, values=slice_values)
 
-            # Infer test subjects
-            # print(self.current_epoch)
-            if (self.current_epoch+1) % self.cfg.build_val_meshes_every_n_epochs == 0:
-                if self.train_cfg['to_train'] == 'compression':
-                    return
-                try:
-                    image = self.generate_renders(batch, smpl_output)
-                except Exception as e:
-                    print(f"Could not generate renderings: {e}")
-                    image = None
-                    
-                if image is not None:
-                    self.logger.log_image(key="val_image/renderings", images=[image.float()])
-                else:
-                    print("Could not generate renderings")
+            # Log the tissue meshes of the canonical body mesh
+            if (self.current_epoch % self.cfg.export_canmeshes_every_n_epochs) == 0:
+                log_canonical_meshes(self, batch)
                     
             return val_metric
+        
+        else:
+            raise NotImplementedError(f"Unknown training mode {self.train_cfg['to_train']}")
 
     def test_step(self, batch, batch_idx):        
         test_metric = {}
         if not self.cfg.visuals_only:
             test_metric = self.compute_test_loss(batch)
-            # val_metric.update({'subject_name': batch['seq_names'][0]})
+            # test_metric.update({'subject_name': batch['seq_names'][0]})
             # print(f"Subject {batch['seq_names'][0]}")
-            # for key, val in val_metric.items():
+            # for key, val in test_metric.items():
             #     self.log(f"test/{key}", val, sync_dist=True)
 
         if self.cfg.eval_export_visuals or self.cfg['render_dataset']:
@@ -540,8 +489,7 @@ class HITTraining(pl.LightningModule):
         #
         output = self.forward(batch, points, eval_mode=True, use_part_id=True)
         occ = output['pred_occ']
-        pred_occ.append(occ)
-            
+        pred_occ.append(occ)      
         
         pred_occ = torch.cat(pred_occ, dim=1)
         
@@ -550,7 +498,7 @@ class HITTraining(pl.LightningModule):
         else:
             pred = pred_occ > 0.5
         part_id = batch['part_id']
-        #
+
         val_loss_dict = metrics.validation_eval(self.cfg, pred, gt_occ, part_id, body_mask)
 
         return val_loss_dict
@@ -791,239 +739,10 @@ class HITTraining(pl.LightningModule):
         #   
         
         
-    def generate_renders(self, batch, smpl_output):
-        
-        im_list = [] # each image will be a line
-        smpl_free_image_tensor = None
-        
-        im_list = []
-                   
-        for li in  self.train_cfg.mri_labels:
-            
-            if li == 'NO':
-                continue
-            
-            channel_label = li
-            channel_index = self.train_cfg['mri_labels'].index(li)
-            
-            meshes, smpl_meshes, smpl_free_meshes, images, smpl_images, smpl_free_images = self.visualize(batch, channel=channel_index, smpl_output=smpl_output)
-            if len(meshes) == 0:
-                print(f"The output meshes for channel {channel_label} could not be reconstructed (this is normal during the first iterations)")
-                continue
-            
-            # Rendering of the predicted tissue
-            images_tensor = torch.from_numpy(np.concatenate(images[:6], axis=1)).permute(2, 0, 1) 
-            im_list.append(images_tensor)
-            
-            # Rendering of the SMPL body
-            smpl_image_tensor = torch.from_numpy(np.concatenate(smpl_images[:6], axis=1)).permute(2, 0, 1)
-            smpl_free_image_tensor = torch.from_numpy(np.concatenate(smpl_free_images[:6], axis=1)).permute(2, 0, 1)
+ 
 
-        if smpl_free_image_tensor is not None:
-            im_list.append(smpl_free_image_tensor)
-            if self.train_cfg['free_verts'] :
-                # Print smpl image in this case because it differs from the free verts one
-                im_list.append(smpl_image_tensor)
 
-        if im_list:
-            image = torch.cat(im_list, dim=1) 
-        else:
-            image=None
-            
-        return image   
-    
-    def generate_canonical_mesh(self, batch, channel_index):
-        
-            smpl_data  = {}
-            smpl_data['betas'] = torch.zeros_like(batch['betas'])
-            smpl_data['body_pose'] = x_pose_like(batch['body_pose'])
-            smpl_data['global_orient'] = torch.zeros_like(batch['global_orient'])   
-            smpl_data['transl'] = torch.zeros_like(batch['transl'])
-            smpl_data['global_orient_init'] = torch.zeros_like(batch['global_orient_init'])
-            smpl_output = self.smpl(**smpl_data, return_verts=True, return_full_pose=True)
-            # 
-            
-            meshes = self.hit.extract_mesh(smpl_output, channel=channel_index, use_mise=True, template=True)
-        
-            return meshes[0]   
 
-    def export_visuals(self, batch, seq_names:list, split: str='test'):
-        # run qualifies if the export is done in the train or test data
-        # This enables visualization
-        
-        smpl_output = self.smpl(**batch, return_verts=True, return_full_pose=True)
-        # smpl_output.v_shaped = batch['v_shaped']
-        # smpl_output.v_free = batch['body_verts']
-        # smpl_output.n_free = batch['body_normals']
-        # batch_size = smpl_output.vertices.shape[0]
-        
-        # smpl_output.betas[0] = torch.zeros_like(smpl_output.betas[0]) # Set to zero pose for visualization of the can space
-        # smpl_output.body_pose[0] = torch.zeros_like(smpl_output.body_pose[0])
-
-        # if len(self.train_cfg.mri_labels) == 1:
-        #     raise NotImplementedError('Only one tissue is not supported yet')
-        
-        if self.data_cfg.synthetic:
-           channel_list = [channel_list[1]]
-           
-        for li in  self.train_cfg.mri_labels:
-            
-            if li == 'NO':
-                continue
-
-            channel_label = li
-            channel_index = self.train_cfg['mri_labels'].index(li)
-            
-            # If the dataset visualization selected only run marching cubes through the gt
-            if not self.cfg['render_dataset']:
-                meshes, smpl_meshes, smpl_free_meshes, images, smpl_images, smpl_free_images = self.visualize(batch, channel=channel_index, smpl_output=smpl_output)
-                
-            meshes_gt, smpl_meshes, smpl_free_meshes, images_gt, smpl_images, smpl_free_images = self.visualize(batch, channel=channel_index, smpl_output=smpl_output, gt=True)
-            to_log = []
-            if self.cfg['render_dataset']:
-                for b_ind, (smpl_mesh, smpl_mesh_free, mesh_gt, image_gt, smpl_image, smpl_free_image) in enumerate(zip(smpl_meshes, smpl_free_meshes, meshes_gt, images_gt, smpl_images, smpl_free_images)):
-                    seq_name = seq_names[b_ind]
-
-                    dst_mesh_dir = os.path.join(self.logger.save_dir, split, 'meshes', f'epoch={self.current_epoch:05d}_step={self.global_step:05d}', seq_name)
-                    dst_image_dir = os.path.join(self.logger.save_dir, split, f'images_{channel_label}', f'epoch={self.current_epoch:05d}_step={self.global_step:05d}', seq_name)
-                    dst_smpl_image_dir = os.path.join(self.logger.save_dir, split, 'smpl_images', f'epoch={self.current_epoch:05d}_step={self.global_step:05d}', seq_name)
-                    for path in [dst_mesh_dir, dst_image_dir, dst_smpl_image_dir]:
-                        pathlib.Path(path).mkdir(parents=True, exist_ok=True)
-
-                    mesh_gt.export( os.path.join(dst_mesh_dir, f'gt_{channel_label}.obj'))
-                    smpl_mesh.export( os.path.join(dst_mesh_dir, f'smpl.obj'))
-                    smpl_mesh_free.export( os.path.join(dst_mesh_dir, f'smpl_free.obj'))
-                    
-                    dst_image_file = os.path.join(dst_image_dir, f'0.png')
-                    dst_image_gt_file = os.path.join(dst_image_dir, f'gt_0.png')
-                    dst_smpl_file = os.path.join(dst_smpl_image_dir, f'0_base.png')
-                    dst_smpl_free_file = os.path.join(dst_smpl_image_dir, f'0.png')
-                    
-                    imsave(dst_image_gt_file, image_gt)
-                    imsave(dst_smpl_file, smpl_image)
-                    imsave(dst_smpl_free_file, smpl_free_image)
-                    print(f'Exported visuals for {seq_name} in \n\t{dst_image_file} \n\t{dst_image_gt_file} \n\t {dst_smpl_file} \n\t {dst_smpl_free_file}')
-
-            else:
-                for b_ind, (mesh, smpl_mesh, smpl_mesh_free, mesh_gt, image, image_gt, smpl_image, smpl_free_image) in enumerate(zip(meshes, smpl_meshes, smpl_free_meshes, meshes_gt, images, images_gt, smpl_images, smpl_free_images)):
-                    seq_name = seq_names[b_ind]
-
-                    dst_mesh_dir = os.path.join(self.logger.save_dir, split, 'meshes', f'epoch={self.current_epoch:05d}_step={self.global_step:05d}', seq_name)
-                    dst_image_dir = os.path.join(self.logger.save_dir, split, f'images_{channel_label}', f'epoch={self.current_epoch:05d}_step={self.global_step:05d}', seq_name)
-                    dst_smpl_image_dir = os.path.join(self.logger.save_dir, split, 'smpl_images', f'epoch={self.current_epoch:05d}_step={self.global_step:05d}', seq_name)
-                    for path in [dst_mesh_dir, dst_image_dir, dst_smpl_image_dir]:
-                        pathlib.Path(path).mkdir(parents=True, exist_ok=True)
-
-                    mesh.export( os.path.join(dst_mesh_dir, f'{channel_label}.obj'))
-                    mesh_gt.export( os.path.join(dst_mesh_dir, f'gt_{channel_label}.obj'))
-                    smpl_mesh.export( os.path.join(dst_mesh_dir, f'smpl.obj'))
-                    smpl_mesh_free.export( os.path.join(dst_mesh_dir, f'smpl_free.obj'))
-                    
-                    dst_image_file = os.path.join(dst_image_dir, f'0.png')
-                    dst_image_gt_file = os.path.join(dst_image_dir, f'gt_0.png')
-                    dst_smpl_file = os.path.join(dst_smpl_image_dir, f'0_base.png')
-                    dst_smpl_free_file = os.path.join(dst_smpl_image_dir, f'0.png')
-                    
-                    imsave(dst_image_file, image)
-                    imsave(dst_image_gt_file, image_gt)
-                    imsave(dst_smpl_file, smpl_image)
-                    imsave(dst_smpl_free_file, smpl_free_image)
-                    print(f'Exported visuals for {seq_name} in \n\t{dst_image_file} \n\t{dst_image_gt_file} \n\t {dst_smpl_free_file} \n\t {dst_smpl_free_file}')
-                
-                    self.logger.log_image(key="test_image/renderings_{channel_label}", images=[image.astype(float), image_gt.astype(float), 
-                                                                                                smpl_image.astype(float)])
-            # self.logger.log_image(key="test_image/meshes", images=wandb.Object3D([mesh_c1_path, mesh_c2_path]))
-
-    @torch.no_grad()
-    def visualize(self, batch, channel, smpl_output, gt=False):
-        
-        channel_name = self.train_cfg['mri_labels'][channel]
-        if channel_name =='LT':
-            col = col_lt
-        elif channel_name =='AT':
-            col = col_at
-        elif channel_name =='NO':
-            col = col_no
-        elif channel_name == 'BONE':
-            col = col_bn
-        else:
-            raise ValueError(f"Unknown channel {channel_name}")
-
-        if self.cfg.eval_export_visuals:
-            mise_resolution0=64
-        else:
-            mise_resolution0=16
-        if gt == True:
-            extract_batch = batch
-        else:
-            extract_batch = None
-        
-
-        if gt == True:
-        # if False:
-            meshes = self.hit.extract_mesh(smpl_output, channel, use_mise=True, 
-                                                  mise_resolution0=mise_resolution0, batch=extract_batch)
-        else: 
-            meshes = self.hit.extract_shaped_mesh( smpl_output, channel, use_mise=False, mise_resolution0=mise_resolution0)
-            mesh_p_list = []
-            for m_can in meshes:
-                mesh_p = self.hit.pose_unposed_tissue_mesh(m_can, smpl_output, do_compress=False)
-                mesh_p_list.append(mesh_p)
-            # import ipdb; ipdb.set_trace()
-            meshes = mesh_p_list
-        
-        global_orient_init = None
-        smpl_vertices = smpl_output.vertices.clone()
-        if 'global_orient_init' in batch:  # normalize visualization wrt the first frame
-            global_orient_init = smplx.lbs.batch_rodrigues(batch['global_orient_init'].reshape(-1, 3)) # B,3,3
-            smpl_vertices = (global_orient_init.transpose(1, 2) @ smpl_vertices.transpose(1, 2)).transpose(1, 2)
-            smpl_free_vertices = (global_orient_init.transpose(1, 2) @ batch['body_verts_free'].transpose(1, 2)).transpose(1, 2)
-            for i, mesh in enumerate(meshes):
-                v = torch.Tensor(mesh.vertices[None,:,:]).cuda()
-                mesh.vertices = (global_orient_init.transpose(1, 2) @ v.transpose(1, 2)).transpose(1, 2).cpu().numpy()[0]
-                mesh.visual.vertex_colors = col
-                # mesh.vertices = (global_orient_init[i].T @ mesh.vertices.T).T # For some reason, this numpy version from original COAP code does not behave as the pytorch version so I used pytorch
-
-        rnd_images, rnd_smpl_images, rnd_smpl_free_images = [], [], []
-        for i, mesh in enumerate(meshes):
-            # save image
-            rnd_images.append((self.renderer.render_mesh(
-                torch.tensor(mesh.vertices).float().unsqueeze(0).to(self.device),
-                torch.tensor(mesh.faces).unsqueeze(0).to(self.device),
-                torch.tensor(mesh.visual.vertex_colors).float().cuda()[None,...,:3]/255,
-                mode='t'
-            )[0].squeeze(0) * 255.).cpu().numpy().astype(np.uint8))
-            
-            # 
-            rnd_smpl_images.append((self.renderer.render_mesh(
-                smpl_vertices[i].float().unsqueeze(0).to(self.device),
-                self.smpl.faces_tensor.unsqueeze(0).to(self.device),
-                mode='p'
-            )[0].squeeze(0) * 255.).cpu().numpy().astype(np.uint8))
-            rnd_smpl_free_images.append((self.renderer.render_mesh(
-                smpl_free_vertices[i].float().unsqueeze(0).to(self.device),
-                self.smpl.faces_tensor.unsqueeze(0).to(self.device),
-                mode='p'
-            )[0].squeeze(0) * 255.).cpu().numpy().astype(np.uint8))            
-            # if True:
-            #     import pyrender
-            #     _scene = pyrender.Scene(ambient_light=[.1, 0.1, 0.1], bg_color=[1.0, 1.0, 1.0])
-            #     VIEWER = pyrender.Viewer(_scene, use_raymond_lighting=True, run_in_thread=True)
-            #     VIEWER.scene.add(pyrender.Mesh.from_trimesh(mesh))
-            #     VIEWER.scene.add(pyrender.Mesh.from_trimesh(trimesh.Trimesh(vertices=smpl_vertices[i].cpu().numpy(), faces=self.smpl.faces)))
-
-        smpl_meshes = []
-        for i in range(smpl_vertices.shape[0]):
-            smpl_mesh = trimesh.Trimesh(vertices=smpl_vertices[i].cpu().numpy(), faces=self.smpl.faces_tensor.cpu().numpy())
-            smpl_meshes.append(smpl_mesh)
-        smpl_free_meshes = []
-        for i in range(smpl_free_vertices.shape[0]):
-            smpl_free_mesh = trimesh.Trimesh(vertices=smpl_free_vertices[i].cpu().numpy(), faces=self.smpl.faces_tensor.cpu().numpy())
-            smpl_free_meshes.append(smpl_free_mesh)
-        return meshes, smpl_meshes, smpl_free_meshes, rnd_images, rnd_smpl_images, rnd_smpl_free_images
-      
-
-    
 @hydra.main(config_path="configs", config_name="config") 
 def main(cfg):
     
@@ -1053,8 +772,8 @@ def main(cfg):
         filename='model-epoch={epoch:04d}-val_accuracy={compression_val/loss:.6f}'
         mode='min'
     elif cfg.train_cfg['to_train'] == 'pretrain':
-        ckp_monitor = 'val/beta_loss'
-        filename='model-epoch={epoch:04d}-val_accuracy={val/beta_loss:.6f}'
+        ckp_monitor = 'val/loss_lbs'
+        filename='model-epoch={epoch:04d}-loss_lbs={val/loss_lbs:.6f}'
         mode='min'
     else:
         ckp_monitor = 'val/accuracy'
@@ -1068,6 +787,9 @@ def main(cfg):
         mode=mode, # The best model is the one with the highest val/accuracy 
         save_last=True, verbose=True, auto_insert_metric_name=False,
     )
+    
+    def checkpoint_fct(ckp_name):
+        trainer.save_checkpoint("f'{out_dir}/ckpts/{ckp_name}.ckpt")
 
     
     if cg.logger == 'wandb':
@@ -1104,17 +826,17 @@ def main(cfg):
     if cfg.ckpt_path is not None and os.path.exists(cfg.ckpt_path):
         ckpt_path = cfg.ckpt_path
     elif cfg.run_eval:
-        ckpt_path = os.path.join(checkpoint_callback.dirpath, f"{checkpoint_callback.CHECKPOINT_NAME_LAST}.ckpt")
-        # from utils.exppath import Exppath
-        # exppath = Exppath(cfg.exp_name)
-        # ckpt_path = exppath.get_best_checkpoint()
+        # ckpt_path = os.path.join(checkpoint_callback.dirpath, f"{checkpoint_callback.CHECKPOINT_NAME_LAST}.ckpt")
+        from utils.exppath import Exppath
+        exppath = Exppath(cfg.exp_name)
+        ckpt_path = exppath.get_best_checkpoint()
         # ckpt_path = checkpoint_callback.best_model_path # this is not working for some reason
     elif os.path.exists(os.path.join(checkpoint_callback.dirpath, f"{checkpoint_callback.CHECKPOINT_NAME_LAST}.ckpt")):
         ckpt_path = os.path.join(checkpoint_callback.dirpath, f"{checkpoint_callback.CHECKPOINT_NAME_LAST}.ckpt")
     else:
         ckpt_path = None
     # create model
-    model = HITTraining(cfg)
+    model = HITTraining(cfg, checkpoint_fct=checkpoint_fct)
     if cfg.run_eval:
         trainer.test(model, ckpt_path=ckpt_path, verbose=True)
     else:

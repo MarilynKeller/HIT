@@ -39,19 +39,19 @@ beta: # mlp that models undoing beta offset
   latent_cond_dim: 128
   latent_cond_layer: []
   latent_embed_dim: -1
-
+  dropout: 0.0
 
 lbs:
   _target_: lib.model.network.ImplicitNetwork
   d_in: 3
   d_out: 24
   width: 128
-  depth: 4
-  geometric_init: false
+  depth: 8
+  geometric_init: true
   bias: 1
   skip_in: -1
   weight_norm: true
-  multires: 0
+  multires: 2
   pose_cond_dim: 69
   pose_cond_layer: []
   pose_embed_dim: -1
@@ -62,6 +62,8 @@ lbs:
   latent_cond_layer: []
   latent_embed_dim: -1
   soft_blend: 20
+  lbs_softmax: True
+  dropout: 0
 
 
 compression:
@@ -76,7 +78,7 @@ compression:
   weight_norm: true
   multires: 0
   pose_cond_dim: 69
-  pose_cond_layer: []
+  pose_cond_layer: [0]
   pose_embed_dim: -1
   shape_cond_dim: 10
   shape_cond_layer: [0]
@@ -84,6 +86,7 @@ compression:
   latent_cond_dim: 128
   latent_cond_layer: []
   latent_embed_dim: -1
+  dropout: 0.0
 
 pose_bs:
   _target_: lib.model.network.ImplicitNetwork
@@ -105,6 +108,7 @@ pose_bs:
   latent_cond_dim: 128
   latent_cond_layer: []
   latent_embed_dim: -1
+  dropout: 0.0
 
 beta_fwd:
   _target_: lib.model.network.ImplicitNetwork
@@ -121,12 +125,12 @@ beta_fwd:
   pose_cond_layer: []
   pose_embed_dim: -1
   shape_cond_dim: 10
-  shape_cond_layer: [0]
+  shape_cond_layer: []
   shape_embed_dim: -1
   latent_cond_dim: 128
   latent_cond_layer: []
   latent_embed_dim: -1
-
+  dropout: 0.0
 
 mri_val: # mlp learning the MRI value in R3 in he canonical space
   _target_: lib.model.network.ImplicitNetwork
@@ -148,4 +152,4 @@ mri_val: # mlp learning the MRI value in R3 in he canonical space
   latent_cond_dim: 64
   latent_cond_layer: [0]
   latent_embed_dim: -1
-
+  dropout: 0.0

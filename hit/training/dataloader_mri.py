@@ -21,6 +21,7 @@ from model.mysmpl import MySmpl
 from hit.training.mri_sampling_utils import (compute_discrete_sdf_gradient,
                                               sample_mri_pts, vis_create_pc)
 from utils.smpl_utils import get_skinning_weights
+from datasets import load_dataset
 
 # all the MRI will be padded with zero to this size
 MRI_SHAPE = (256, 256, 128) #(512,512,128) for mpi
@@ -209,6 +210,40 @@ class MRIDataset(torch.utils.data.Dataset):
                                  'body_mask',
                                  'mri_data_packed']
 
+        def hf_to_hit(hf_data_sample):
+            """
+            convert hf data to hit data
+            :param hf_data_sample:
+            :return: hit_data_sample
+            """
+            hit_data_sample = {}
+            mri_seg_dict = {}
+            smpl_dict = {}
+            # gender
+            hit_data_sample['gender'] = hf_data_sample['gender']
+            # mri_seg
+            hit_data_sample['mri_seg'] = np.array(hf_data_sample['mri_seg']).transpose(1,2,0)
+            # mri_labels
+            hit_data_sample['mri_labels'] = hf_data_sample['mri_labels']
+            # mri_seg_dict
+            mri_seg_dict['BODY'] = np.array(hf_data_sample['body_mask'])
+            hit_data_sample['mri_seg_dict'] = mri_seg_dict
+            # resolution
+            hit_data_sample['resolution'] = np.array(hf_data_sample['resolution'])
+            # center
+            hit_data_sample['center'] = np.array(hf_data_sample['center'])
+            # smpl_dict
+            smpl_dict['verts'] = np.array(hf_data_sample['smpl_dict']['verts'])
+            smpl_dict['verts_free'] = np.array(hf_data_sample['smpl_dict']['verts_free'])
+            smpl_dict['faces'] = np.array(hf_data_sample['smpl_dict']['faces'])
+            smpl_dict['pose'] = np.array(hf_data_sample['smpl_dict']['pose'])
+            smpl_dict['betas'] = np.array(hf_data_sample['smpl_dict']['betas'])
+            smpl_dict['trans'] = np.array(hf_data_sample['smpl_dict']['trans'])
+            hit_data_sample['smpl_dict'] = smpl_dict
+            # dataset_name
+            hit_data_sample['dataset_name'] = hf_data_sample['dataset_name']
+            hit_data_sample['subject_ID'] = hf_data_sample['subject_ID']
+            return hit_data_sample
 
         def cache_condition(train_cfg):
             # return True
@@ -319,6 +354,15 @@ class MRIDataset(torch.utils.data.Dataset):
         if force_recache:
             reason = 'force recache set to True in the dataloader'
 
+        smpl_body = smplx.create(**smpl_cfg, model_type='smpl', model_path=cg.smplx_models_path)
+        num_body_joints = smpl_body.NUM_BODY_JOINTS
+
+        data_root = cg.packaged_data_folder
+
+        paths = get_split_files(data_root, gender, split)
+        hf = data_cfg.huggingface
+        if hf:
+            paths = load_dataset("varora/hit", name=gender, split=split)
         if do_cache:
             if cache_exists and not data_cfg['force_recache']:  # and False:
                 print(f'Loading cached dataset chunks for {gender} {split} from {cache_dir}')
@@ -335,13 +379,6 @@ class MRIDataset(torch.utils.data.Dataset):
                     f'No cached dataset {split} found at {cache_path}. A cache will be created when the dataset is done loading.')
         else:
             print(f'Not caching dataset {split} because {reason}')
-
-        smpl_body = smplx.create(**smpl_cfg, model_type='smpl', model_path=cg.smplx_models_path)
-        num_body_joints = smpl_body.NUM_BODY_JOINTS
-
-        data_root = cg.packaged_data_folder
-
-        paths = get_split_files(data_root, gender, split)
 
         if data_cfg.subjects == 'first':
             paths = [paths[0]]
@@ -368,12 +405,16 @@ class MRIDataset(torch.utils.data.Dataset):
         print('Loading dataset into memory')
         for pi, path in tqdm.tqdm(enumerate(paths)):
             subj_data = {}
-            if path.endswith('.pkl'):
-                data = pkl.load(open(path, 'rb'))
-            elif path.endswith('.gz'):
-                with gzip.open(path, "rb") as f:
-                    data = pickle.load(f)
-            assert data is not None, f'Could not load {path}'
+
+            if hf:
+                data = hf_to_hit(path)
+            else:
+                if path.endswith('.pkl'):
+                    data = pkl.load(open(path, 'rb'))
+                elif path.endswith('.gz'):
+                    with gzip.open(path, "rb") as f:
+                        data = pickle.load(f)
+                assert data is not None, f'Could not load {path}'
 
             # Extract smpl data from the package
             gender = data['gender']
@@ -408,7 +449,10 @@ class MRIDataset(torch.utils.data.Dataset):
             subj_data['global_orient_init'] = subj_data['global_orient']  # For back compatibility
 
             # Name of the subject
-            seq_name = os.path.splitext(os.path.basename(path))[0]
+            if hf:
+                seq_name = data['subject_ID']
+            else:
+                seq_name = os.path.splitext(os.path.basename(path))[0]
             subj_data['seq_names'] = seq_name
 
             # For backward compatibility with export_visuals function
@@ -569,7 +613,7 @@ class MRIDataset(torch.utils.data.Dataset):
             else:
                 data_stacked[key] = val
 
-        print(f"Size of stacked data for {gender} {split} = {get_deep_size(data_stacked)} GBs")
+        print(f"Size of stacked data for {gender} {split} = {get_deep_size(data_stacked)/1e9} GBs")
 
         if do_cache:
             print(f'Caching dataset {gender} {split} to {cache_dir} in {n_chunks} chunks')
@@ -983,8 +1027,13 @@ class MRIDataset(torch.utils.data.Dataset):
         mri_pose = mri_pose.cpu().numpy()
 
         if self.data_cfg.synt_style == 'random':
-            subj_data['body_pose'] = random_pose.astype(np.float32)
+            subj_data['body_pose'] = xpose
             subj_data['betas'] = random_betas.astype(np.float32)
+            
+        if self.data_cfg.synt_style == 'fixed':
+            subj_data['body_pose'] = xpose
+            subj_data['betas'] = np.zeros(nb_beta).astype(np.float32)
+            subj_data['betas'][0:2] = 2
 
         if self.data_cfg.synt_style == 'random_per_joint':
             subj_data['betas'] = random_betas.astype(np.float32)

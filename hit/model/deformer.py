@@ -162,7 +162,7 @@ class ForwardDeformer(torch.nn.Module):
             if mask is None:
                 mask = torch.ones( (n_batch, n_point), device=xc.device, dtype=torch.bool)
 
-            cond = { key:expand_cond(cond[key], xc) for key in cond}
+            cond = { key:expand_cond(cond[key], xc) for key in cond if cond}
             cond = mask_dict(cond, mask)
 
             xc = xc[mask]
@@ -190,26 +190,61 @@ class ForwardDeformer(torch.nn.Module):
             w (tensor): skinning weights. shape: [B, N, J]
         """
 
-        input_dim = xc.ndim
+        # input_dim = xc.ndim
+        # if input_dim == 3:
+        #     n_batch, n_point, n_dim = xc.shape
 
-        if input_dim == 3:
-            n_batch, n_point, n_dim = xc.shape
+        #     if mask is None:
+        #         mask = torch.ones( (n_batch, n_point), device=xc.device, dtype=torch.bool)
 
-            if mask is None:
-                mask = torch.ones( (n_batch, n_point), device=xc.device, dtype=torch.bool)
+        #     cond = { key:expand_cond(cond[key], xc) for key in cond}
+        #     cond = mask_dict(cond, mask)
 
-            cond = { key:expand_cond(cond[key], xc) for key in cond}
-            cond = mask_dict(cond, mask)
-
-            xc = xc[mask]
+        #     xc = xc[mask]
         
         out = self.__query_weights(xc, cond, warp=False)
+        out_full = out
 
-        if input_dim == 3:
-            out_full = val_pad * torch.ones( (n_batch, n_point, out.shape[-1]), device=out.device, dtype=out.dtype)
-            out_full[mask] = out
-        else:
-            out_full = out
+        # if input_dim == 3:
+        #     out_full = val_pad * torch.ones( (n_batch, n_point, out.shape[-1]), device=out.device, dtype=out.dtype)
+        #     out_full[mask] = out
+        # else:
+        #     out_full = out
+
+        return out_full
+    
+    def query_betadisp(self, xc, cond, mask=None, val_pad=0):
+        """Get skinning weights in canonical (with betas) space. 
+        Batched wrapper of __query_weights
+
+        Args:
+            xc (tensor): canonical (with betas) point. shape: [B, N, D]
+            cond (dict): conditional input.
+            mask (tensor): valid points that need compuation. shape: [B, N]
+
+        Returns:
+            w (tensor): skinning weights. shape: [B, N, J]
+        """
+
+        # input_dim = xc.ndim
+        # if input_dim == 3:
+        #     n_batch, n_point, n_dim = xc.shape
+
+        #     if mask is None:
+        #         mask = torch.ones( (n_batch, n_point), device=xc.device, dtype=torch.bool)
+
+        #     cond = { key:expand_cond(cond[key], xc) for key in cond if cond[key] is not None}
+        #     cond = mask_dict(cond, mask)
+
+        #     xc = xc[mask]
+        
+        out = self.disp_network(xc, cond)
+
+        # if input_dim == 3:
+        #     out_full = val_pad * torch.ones( (n_batch, n_point, out.shape[-1]), device=out.device, dtype=out.dtype)
+        #     out_full[mask] = out
+        # else:
+        out_full = out
 
         return out_full
 
@@ -276,6 +311,10 @@ class ForwardDeformer(torch.nn.Module):
         # compute init jacobians
         if not eval_mode:
             J_inv_init = self.__gradient(xc_init, cond, tfs).inverse()
+            # print('J_inv_init', J_inv_init)
+            if torch.isnan(J_inv_init).any():
+                import ipdb; ipdb.set_trace()
+            
         else:
             w = self.query_weights(xc_init, cond)
             J_inv_init = einsum("pn,pnij->pij", w, tfs)[:, :3, :3].inverse()
@@ -292,6 +331,9 @@ class ForwardDeformer(torch.nn.Module):
             xd_opt = self.__forward_skinning(xc_opt, mask_dict(cond, mask), tfs[mask])
 
             error = xd_opt - xd_tgt[mask]
+            
+            if torch.isnan(xd_opt).any() or torch.isnan(xd_tgt).any() or torch.isnan(xc_opt).any():
+                import ipdb; ipdb.set_trace()
 
             # reshape to [?,D,1] for boryden
             error = error.unsqueeze(-1)
@@ -360,6 +402,9 @@ class ForwardDeformer(torch.nn.Module):
         
         # print(xc.shape)#import ipdb; ipdb.set_trace()
         w = self.lbs_network(xc, cond)
+        
+        if torch.isnan(w).any():
+            import ipdb; ipdb.set_trace()
 
         w = self.soft_blend * w
 
@@ -386,15 +431,23 @@ class ForwardDeformer(torch.nn.Module):
         for i in range(xd.shape[-1]):
             d_out = torch.zeros_like(xd, requires_grad=False, device=xd.device)
             d_out[..., i] = 1
-            grad = torch.autograd.grad(
-                outputs=xd,
-                inputs=xc,
-                grad_outputs=d_out,
-                create_graph=False,
-                retain_graph=True,
-                only_inputs=True,
-            )[0]
+            try:
+                grad = torch.autograd.grad(
+                    outputs=xd,
+                    inputs=xc,
+                    grad_outputs=d_out,
+                    create_graph=False,
+                    retain_graph=True,
+                    only_inputs=True,
+                )[0]
+            except:
+                print("Error in gradient computation")
+                import ipdb; ipdb.set_trace()
             grads.append(grad)
+            
+            if torch.isnan(grad).any():
+                print("Nan value in gradient")
+                import ipdb; ipdb.set_trace()
 
         return torch.stack(grads, dim=-2)
 
@@ -429,5 +482,8 @@ def skinning(x, w, tfs, inverse=False, normal=False):
             p_h = einsum('pij,pj->pi', w_tf.inverse(), p_h)
         else:
             p_h = einsum('pn, pnij, pj->pi', w, tfs, p_h)
+            
+        if torch.isnan(p_h).any():
+            import ipdb; ipdb.set_trace()
         return p_h[:, :3]
 

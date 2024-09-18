@@ -25,6 +25,12 @@ def fig2img(fig, close_fig=True):
     fig.savefig('/tmp/test.png')
     # load and return the image
     img = Image.open('/tmp/test.png')
+    try:
+        # Try a first time to get the data to avoid this bug:
+        # *** OSError: unrecognized data stream contents when reading image file
+        img.getdata()
+    except:
+        pass
     if close_fig:
         plt.close()
     return img
@@ -33,7 +39,15 @@ def fig2img(fig, close_fig=True):
 class SliceLevelSet():
     
     # def __init__(self, nbins=10, xbounds=[-0.2,0.2], ybounds=[-0.5,0], res=0.01):
-    def __init__(self, nbins=10, xbounds=[-0.2,0.2], ybounds=[-0.2,0.2], z_bounds=[-0.2, 0.2], res=0.005, highres=False):
+    def __init__(self, nbins=10, xbounds=[-0.2,0.2], ybounds=[-0.2,0.2], z_bounds=[-0.2, 0.2], res=0.005):
+        """ SliceLevelSet class to generate and plot slices of the level set function
+        Args:
+            nbins: number of bins for the contour plot
+            xbounds: x axis bounds in meters
+            ybounds: y axis bounds in meters
+            res: resolution of the grid
+        """
+        
         self.nbins = nbins
         self.xbounds = xbounds
         self.ybounds = ybounds
@@ -104,7 +118,7 @@ class SliceLevelSet():
         return occ_val        
         
         
-    def plot_disp_field(self, disp, occupancy, to_plot=True, quiver=False, twod_intensities=True, is_compression=False):
+    def plot_disp_field(self, disp, occupancy=None, quiver=False, twod_intensities=False, is_compression=False):
         cmap = cm.rainbow 
         fig = plt.figure(figsize=(5,5))
         ax = plt.Axes(fig, [0., 0., 1., 1.])
@@ -114,24 +128,24 @@ class SliceLevelSet():
         
         assert len(disp.shape) == 3 and disp.shape[-1] == 3
         
-        # Prepare occ
-        occ_val = self.process_occ(occupancy)    
-        occ_val = occ_val.reshape(self.xx.shape[0], self.xx.shape[1])
-        levels=matplotlib.ticker.MaxNLocator(nbins=self.nbins).tick_values(occ_val.min(),occ_val.max())
-        plt.contour(self.xx, self.yy, occ_val, colors='black', levels=levels)
+        if occupancy is not None:
+            # Prepare occ
+            occ_val = self.process_occ(occupancy)    
+            occ_val = occ_val.reshape(self.xx.shape[0], self.xx.shape[1])
+            levels=matplotlib.ticker.MaxNLocator(nbins=self.nbins).tick_values(occ_val.min(),occ_val.max())
+            plt.contour(self.xx, self.yy, occ_val, colors='black', levels=levels)
         
         # Prepare disp    
         disp = disp.detach().cpu().numpy()[0]
         disp = disp.reshape(self.xx.shape[0], self.xx.shape[1], 3)
         
-        
         c = np.linalg.norm(disp, axis=-1)
         
         if self.plane == 'frontal':
-            qs = 10
-            density=10
+            qs = int(0.04 /self.res)
+            density= 10
         else:
-            qs = int(2 * 0.004 / self.res)
+            qs = int(0.016 / self.res)
             density=2
           
         
@@ -139,23 +153,29 @@ class SliceLevelSet():
         if self.plane == 'frontal':
             dx = disp[:,:,0]
             dy = disp[:,:,1]
+            if is_compression:
+                # The front visualization of the compression vector in T pose does not 
+                # make sense as the vector orientation depends on the limbs pose
+                dx = disp[:,:,0]*0
+                dy = disp[:,:,2]*0
         else:
             dx = disp[:,:,0]
             dy = disp[:,:,2]
             if is_compression:
-                dx = disp[:,:,2]
+                # The compression vector is learned in the canonical but gives a vector in posed space
+                dx = -disp[:,:,1]
                 dy = -disp[:,:,0]
-            
+                            
         if quiver:
             px = self.xx[::qs, ::qs]
             py = self.yy[::qs, ::qs]
-            dx = dx[::qs,::qs,0]
-            dy = dy[::qs,::qs,2]
+            dx = dx[::qs,::qs]
+            dy = dy[::qs,::qs]
             qc = c[::qs,::qs]
             plt.quiver(px, py, dx, dy, qc, cmap=cmap, angles='xy', scale_units='xy', scale=1)
         else:
             if twod_intensities:
-                import ipdb; ipdb.set_trace()
+                # import ipdb; ipdb.set_trace()
                 c = np.linalg.norm(np.stack([dx,dy], axis=2), axis=-1)
             plt.streamplot(self.xx, self.yy, dx, dy, color=c, density = density, cmap=cmap) 
             
@@ -163,32 +183,26 @@ class SliceLevelSet():
         img = fig2img(fig)
         return img
     
-    def plot_occupancy(self, occ, to_plot=True):
-        cmap = cm.rainbow 
-        fig = plt.figure()
+    def plot_occupancy(self, occ):
         # Tissues occupancy
         assert len(occ.shape) ==  3 and occ.shape[-1] == 4
         # This is the 4C occupancy
         occ = torch.sigmoid(occ)
-        # occ = torch.argmax(occ, dim=-1)
-        # values = occ       
-        # values = values.detach().cpu().numpy()[0]
-        
+        occ = torch.argmax(occ, dim=-1)
+
         #color by tissue
-        # color_values = np.take(tissue_palette, values.astype(int), axis=0)
-        # values = color_values
-        # values = values.reshape(self.xx.shape[0], self.xx.shape[1], 4)
+        color_values = np.take(tissue_palette, occ[0].cpu().numpy().astype(int), axis=0)
         
-        values = occ.detach().cpu().numpy()[0][...,1:]
-        values = values.reshape(self.xx.shape[0], self.xx.shape[1], 3)*255
+        values = color_values.reshape(self.xx.shape[0], self.xx.shape[1], 4)*255
+        img = Image.fromarray(values.astype(np.uint8))
         
-        plt.imshow(values, interpolation='bilinear', origin='lower', extent=(self.xbounds[0], self.xbounds[1], 
-                                                                                    self.ybounds[0], self.ybounds[1]))
-            
-        return values 
+        # Flip upside down
+        img = img.transpose(Image.FLIP_TOP_BOTTOM)
+             
+        return img 
     
     
-    def plot_skinning_weights(self, sw, occupancy, to_plot=True):
+    def plot_skinning_weights(self, sw, occupancy=None):
         
         fig = plt.figure()
         # skinning weights
@@ -200,11 +214,12 @@ class SliceLevelSet():
         plt.imshow(sw, interpolation='bilinear', origin='lower', extent=(self.xbounds[0], self.xbounds[1], 
                                                                             self.ybounds[0], self.ybounds[1]))
         
-        occ_val = self.process_occ(occupancy)    
-        occ_val = occ_val.reshape(self.xx.shape[0], self.xx.shape[1])
-        levels=matplotlib.ticker.MaxNLocator(nbins=self.nbins).tick_values(occ_val.min(),occ_val.max())
-        plt.contour(self.xx, self.yy, occ_val, colors='black', levels=levels)
-        
+        if occupancy is not None:
+            occ_val = self.process_occ(occupancy)    
+            occ_val = occ_val.reshape(self.xx.shape[0], self.xx.shape[1])
+            levels=matplotlib.ticker.MaxNLocator(nbins=self.nbins).tick_values(occ_val.min(),occ_val.max())
+            plt.contour(self.xx, self.yy, occ_val, colors='black', levels=levels)
+
         img = fig2img(fig)
         return img
     

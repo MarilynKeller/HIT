@@ -148,6 +148,14 @@ def get_gdna_bone_transfo(smpl, smpl_output):
 
 
 def get_skinning_weights(points, smpl_vertices, smpl, free_verts=None):
+    method = 'closest' # 'closest', 'normals_based
+    if method == 'closest':
+        return get_skinning_weights_closest(points, smpl_vertices, smpl, free_verts)
+    else:
+        return get_skinning_weights_normals_based(points, smpl_vertices, smpl, free_verts)
+
+
+def get_skinning_weights_closest(points, smpl_vertices, smpl, free_verts=None):
     """ 
     Given points in world space, compute the skinning weights for each point
     points : [T, 3] numpy array
@@ -173,43 +181,69 @@ def get_skinning_weights(points, smpl_vertices, smpl, free_verts=None):
         dict_part[ele] = idx 
     part_num = np.array([ dict_part[v] for v in data])
     
-    v = smpl_vertices
+    body_verts = smpl_vertices
     if free_verts is not None:
-        v = free_verts
+        body_verts = free_verts
         
     # import ipdb; ipdb.set_trace()
-    mesh = trimesh.Trimesh(v, smpl.faces, process=False)
+    mesh = trimesh.Trimesh(body_verts, smpl.faces, process=False)
     prox_query = trimesh.proximity.ProximityQuery(mesh)
     closest_vertex, closest_vertex_index = prox_query.vertex(points)
-    skinning_weights = smpl.lbs_weights[closest_vertex_index]
-    part_id = torch.tensor(part_num[closest_vertex_index])
+    skinning_weights = smpl.lbs_weights[closest_vertex_index].cpu().detach().numpy()
+    part_id = np.argmax(skinning_weights, axis=1)
+    # return skinning_weights, part_id
+
+    # Find vertices rigged to the left thigh (Joint 1)
+    lt_vert_pt = body_verts[974] # vertex on the external side of the left thigh
+    rt_vert_pt = body_verts[4460] # vertex on the external side of the right thigh
     
-    # if isinstance(points, np.ndarray):
-    #     import ipdb; ipdb.set_trace()
-    #     points = points[None]
-    #     if free_verts is not None:
-    #         free_verts = free_verts[None]
-    # else:
-    #     points = points.cpu().numpy()
     
-    # B = points.shape[0]
-    # T = points.shape[1]
-    # skinning_weights = torch.zeros((B, T, smplx_body.lbs_weights.shape[1]), dtype=torch.float32)
-    # part_id = torch.zeros((B, T), dtype=torch.int32)
-    # for bi in range(B):
-    #     v = smpl_output.vertices[bi].cpu().numpy()
-    #     if free_verts is not None:
-    #         v = free_verts[bi].cpu().squeeze().numpy()
-            
-    #     mesh = trimesh.Trimesh(v, smplx_body.faces, process=False)
-    #     prox_query = trimesh.proximity.ProximityQuery(mesh)
-    #     closest_vertex, closest_vertex_index = prox_query.vertex(points[bi])
-    #     skinning_weights_i = smplx_body.lbs_weights[closest_vertex_index]
-    #     part_id_i = torch.tensor(part_num[closest_vertex_index])
-        
-    #     skinning_weights[bi] = skinning_weights_i
-    #     part_id[bi] = part_id_i
-        
+    # List all the vertices that are associated with the wrong part
+    # A vertex is wrongly associated with the left thigh if it is closer to the right thigh side than to the left thigh side
+    mask_wrong_l = (part_id == 1) & (np.linalg.norm(points - lt_vert_pt, axis=-1) > np.linalg.norm(points - rt_vert_pt, axis=-1))
+    mask_wrong_r = (part_id == 2) & (np.linalg.norm(points - lt_vert_pt, axis=-1) < np.linalg.norm(points - rt_vert_pt, axis=-1))
+
+    debug=False
+    if debug:
+        from psbody.mesh import MeshViewer, MeshViewers
+        from psbody.mesh.sphere import Sphere
+        mv = MeshViewer()
+        tigh_mask = (part_id==1).numpy() | (part_id==2)
+        mv.set_static_meshes([Mesh(v=body_verts),                             
+                            # Mesh(v=points[tigh_mask], f=[], vc=weights2colors(skinning_weights[tigh_mask])),
+                            Mesh(v=points, f=[], vc=weights2colors(skinning_weights)),
+                            # Mesh(v = points[(part_id == 1)], f=[], vc=np.array([0,1,0])),
+                            # Mesh(v = points[(np.linalg.norm(points - lt_vert_pt, axis=-1) > np.linalg.norm(points - rt_vert_pt, axis=-1))], f=[], vc=np.array([1,0,0])), 
+                            # Mesh(v = points[mask_wrong_l], f=[], vc=np.array([0,1,0])), 
+                            Sphere(lt_vert_pt, 0.02).to_mesh(np.array([0,1,1])), 
+                            # Sphere(rt_vert_pt, 0.02).to_mesh(np.array([0,1,1]))
+                            ])
+        import ipdb; ipdb.set_trace()
+    
+    # Correct the vertices wrongly associated with the left thigh
+    # Inverse right and left thigh weights
+    skinning_weights[mask_wrong_l, 2] = skinning_weights[mask_wrong_l, 1]
+    skinning_weights[mask_wrong_l, 4] = skinning_weights[mask_wrong_l, 3]
+    # Set the wrong limb weight to 0
+    skinning_weights[mask_wrong_l, 1] = 0
+    skinning_weights[mask_wrong_l, 3] = 0
+    # Set the part id to the right part
+    part_id[mask_wrong_l] = 2
+    
+    # Correct the vertices wrongly associated with the right thigh
+    skinning_weights[mask_wrong_r, 1] = skinning_weights[mask_wrong_r, 2]
+    skinning_weights[mask_wrong_r, 3] = skinning_weights[mask_wrong_r, 4]
+    skinning_weights[mask_wrong_r, 2] = 0
+    skinning_weights[mask_wrong_r, 4] = 0
+    part_id[mask_wrong_r] = 1
+    
+    if debug:
+        print(f"Corrected {mask_wrong_l.sum()} vertices wrongly associated with the left thigh")
+        print(f"Corrected {mask_wrong_r.sum()} vertices wrongly associated with the right thigh")
+
+    if debug:
+        tigh_mask = (part_id==1).numpy() | (part_id==2).numpy()
+        Mesh(v=points[tigh_mask], f=[], vc=weights2colors(skinning_weights[tigh_mask]).numpy()).show()
         
     return skinning_weights, part_id
 
@@ -232,7 +266,7 @@ def get_skinning_weights_normals_based(points, smpl_vertices, smpl, free_verts=N
         assert isinstance(free_verts, np.ndarray), 'free_verts should be numpy array'
     assert isinstance(smpl_vertices, np.ndarray)
     # For each smpl vertex, gives the corresponding part
-    with open('../v2p.pkl', 'rb') as f:
+    with open(cg.v2p, 'rb') as f:
         data = pickle.load(f)
     part_list = sorted(set(data))
     dict_part = {}
@@ -329,7 +363,7 @@ def get_skinning_weights_normals_based(points, smpl_vertices, smpl, free_verts=N
         return rigged_batch
 
     n_query_points = 10000
-    use_numba = True
+    use_numba = False
     debug = False
     if use_numba:
         mesh_vertices = np.asarray(mesh.vertices)
@@ -525,7 +559,7 @@ def psm(verts, smpl, values=None, indices=False, maxval=None, norm=False, displa
         values = values[0].detach().cpu().numpy()
         if len(values.shape) == 1: 
             mesh.set_vertex_colors_from_weights(values)
-            mesh.vc = mesh.vc/np.max(mesh.vc)
+            mesh.vc = mesh.vc/(np.max(mesh.vc)+1e-7)
         elif len(values.shape) == 2:
             if maxval is None:
                 maxval = np.abs(values).max()
@@ -533,12 +567,12 @@ def psm(verts, smpl, values=None, indices=False, maxval=None, norm=False, displa
                 values = np.linalg.norm(values, axis=1)
                 mesh.set_vertex_colors_from_weights(values)
             else:
-                mesh.vc = np.abs(values)/maxval
+                mesh.vc = np.abs(values)/(maxval+1e-7)
         else:
             raise Exception(f'Unknown values shape, should be [6890] or [6890,3], got {values.shape}')
     elif skin_weights is not None:
         mesh.vc = weights2colors(skin_weights[0].detach().cpu().numpy())
-        mesh.vc = mesh.vc/np.max(mesh.vc)
+        mesh.vc = mesh.vc/(np.max(mesh.vc)+1e-7)
     
     if display :      
         mesh.show()

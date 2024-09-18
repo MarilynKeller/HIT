@@ -1,5 +1,30 @@
        
 import torch
+import torch.nn.functional as F
+
+def occ2sdf(scores, channel):
+    """ Convert per channel occupancy scores to SDF
+    Args:
+        occ : B, T, C # Occupancy scores for the B batches, T points and C channels
+        channel : int # Channel to extract the SDF for (must be in [0, C-1])
+    Returns:
+        sdf_value : B, T # a float value sucht that sdf[x, channel]=0.5 when (occ[x, channel]==occ[x, ci] & channel = argmax(occ))
+    """
+    occ_all_tissue = F.softmax(scores, dim=-1) 
+
+    sorted_idx = torch.argsort(occ_all_tissue, dim=-1, descending=True)
+                
+    best_idx = sorted_idx[:,:,0] 
+    best_non_channel_idx = best_idx
+    best_non_channel_idx[best_idx==channel] = sorted_idx[:,:,1][best_idx==channel]
+    
+    channel_score = occ_all_tissue[..., channel]
+    best_non_channel_score = occ_all_tissue.gather(-1, best_non_channel_idx.unsqueeze(-1)).squeeze(-1)
+    
+    assert (best_non_channel_idx==channel).sum() == 0
+    sdf_tissue = channel_score / (channel_score + best_non_channel_score)
+    sdf = sdf_tissue.cpu().squeeze(0)
+    return sdf
 
 
 def occ_to_percentage(occ_array_inside, labels, is_inside=None, mask_with_inside=True):
