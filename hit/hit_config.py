@@ -4,7 +4,6 @@ package_directory = os.path.dirname(os.path.abspath(__file__))
 
 ################## To edit
 # Dataset
-huggingface = True # If True, use huggingface to load the models, otherwise download manually and set the path below
 packaged_data_folder = '/home/mkeller2/data2/Data/hit_release/hit_dataset_v1.0/repackaged'
 
 # Trained HIT models

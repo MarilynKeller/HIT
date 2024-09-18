@@ -145,8 +145,10 @@ python demos/infer_smpl.py  --exp_name=hit_male --to_infer smpl_file --target_bo
 
 # Dataset
 
-The dataset is hosted on [Huggingface](https://huggingface.co/datasets/varora/HIT) and will be downloaded automatically when the code is run. 
-Alternatively, you can download the HIT dataset from HIT project page [https://hit.is.tue.mpg.de/], in the `Download` tab.
+
+You can download the HIT dataset from HIT project page [https://hit.is.tue.mpg.de/], in the `Download` tab. Then add the path to the dataset folder in `hit_config.py`.
+
+(! Broken for now) We also provide a [huggingface](https://huggingface.co/datasets/varora/HIT) version of the HIT dataset. To use it instead, just set data_cfg.huggingface = False in your training command line and the dataset will be downloaded automatically from the huggingface hub.
 
 This dataset contains data for 127 males and 191 females. For each subject, it contains:
 

@@ -357,6 +357,7 @@ class MRIDataset(torch.utils.data.Dataset):
         paths = get_split_files(data_root, gender, split)
         hf = data_cfg.huggingface
         if hf:
+            print(f'Dowlnoading dataset {split} from huggingface.')
             paths = load_dataset("varora/hit", name=gender, split=split)
         if do_cache:
             if cache_exists and not data_cfg['force_recache']:  # and False:
