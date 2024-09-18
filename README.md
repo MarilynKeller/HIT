@@ -1,6 +1,37 @@
 # HIT
 
-This repo contains the code for training and testing HIT.
+Official repo of the 2024 paper: *HIT: Estimating Internal Human Implicit Tissues from the Body Surface*
+
+[[paper]](https://hit.is.tue.mpg.de/media/upload/4978.pdf) [[project page]](https://hit.is.tue.mpg.de/)
+
+<img src="assets/teaser.png" width="500">
+
+## Table of Contents
+<!-- outline -->
+- [What is HIT ?](#what-is-hit-)
+- [Content of this repo](#content-of-this-repo)
+- [Installation](#installation)
+- [Demos](#demos)
+- [Dataset](#dataset)
+- [Training HIT](#training)
+- [Testing HIT](#testing)
+
+## What is HIT ?
+HIT is a neural network that learns to infer the internal tissues of the human body from its surface. The input is a 3D body represented as SMPL parameters (a shape vector β and a pose vector θ) and the output is an implicit function, that given a point in space, returns the probability of this point being part of the following tissue:
+- lean tissue (muscles, organs) (LT)
+- adipose tissue (subcutaneous) (AT)
+- bone (BT)
+- empty space (inside the lungs, outside the body) (E)
+
+The implicit HIT function can also be used to generate the 3D mesh of the tissues using the marching cube algorithm.
+
+The figure below illustrates our approach. Given a posed body shape (β, θ), and a 3D point xm, HIT first canonicalizes this point to the corresponding location xc inside an average template body, and then predicts the class of the tissue at location xc.
+
+<img src="assets/pipeline.png" width="700">
+
+## Content of this repo
+
+This repo contains the code to train and test HIT on the HIT dataset (available on our project page). It also contains some demo code to infer the tissue meshes for a given SMPL body.
 
 
 # Installation
@@ -53,7 +84,7 @@ pip install -e .
 
 #### SMPL model files
 Download the SMPL model from https://smpl.is.tue.mpg.de/ and update the path `smplx_models_path` in `hit_config.py` to the proper path.
-The folder hierarchie should be the following:
+The folder hierarchy should be the following:
 ```
 ${MODELS}
 ├── smpl
@@ -76,7 +107,7 @@ ${MODELS}
 
 ## Prerained models
 
-You can download the pretrained models checkpoints for male and female from the Download tab at [https://hit.is.tue.mpg.de/].
+You can download the pretrained model checkpoints for male and female from the Download tab at [https://hit.is.tue.mpg.de/].
 Create a folder `HIT/pretrained` and place the pretrained models inside, or edit the path `trained_models_folder` in `hit_config.py`. 
 
 You should have the following hierarchy:
@@ -115,10 +146,10 @@ python demos/infer_smpl.py  --exp_name=hit_male --to_infer smpl_file --target_bo
 
 # Dataset
 
-The Dataset is hosted on [Huggingface](https://huggingface.co/datasets/varora/HIT) and will be downloaded automatically when running the code. 
+The dataset is hosted on [Huggingface](https://huggingface.co/datasets/varora/HIT) and will be downloaded automatically when the code is run. 
 Alternatively, you can download the HIT dataset from HIT project page [https://hit.is.tue.mpg.de/], in the `Download` tab.
 
-This dataset contains data for 157 males and 241 females. For each subject it contains:
+This dataset contains data for 127 males and 191 females. For each subject, it contains:
 
 ```shell
 {
@@ -128,8 +159,8 @@ This dataset contains data for 157 males and 241 females. For each subject it co
   'mri_seg_dict': "a dictionary of individual masks of the different tissues (LT, AT, BT, ...)",
   'resolution': "per slice resolution in meters",
   'center': "per slice center, in pixels",
-  'smpl_dict': "dictionary containing all the relevant SMPL parameters of the subject alongwith mesh faces
-                and vertices ('verts': original fit, 'verts_free': compressed fit")
+  'smpl_dict': "dictionary containing all the relevant SMPL parameters of the subject along with mesh faces
+ and vertices ('verts': original fit, 'verts_free': compressed fit")
 }
 ```
 
@@ -160,10 +191,10 @@ In red are the points outside the SMPL template mesh, in green the points inside
 # Training 
 
 
-## Trianing dataset
+## Training dataset
 
-The first loading of the dataset required sampling which takes time. We do this once and then cache the result for further fast loading.
-To forces the recaching of the dataset for a gender, run:
+The first loading of the dataset requires sampling which takes time. We do this once and then cache the result for further fast loading.
+To force the recaching of the dataset for a gender, run:
 ```shell
 python demos/load_data.py -s train -i 0 --gender male --all --recache  
 ```
@@ -172,7 +203,7 @@ To load the cached training dataset in memory then, you will need at least 25 GB
 
 ## Training parameters
 The default training parameters are in ```config.yaml```. The project uses hydra to load this config file.
-Each parameter of this file can be overwriten through command line arguments.
+Each parameter of this file can be overwritten through command line arguments.
 
 ## Monitoring the training
 
@@ -187,7 +218,6 @@ To retrain HIT, first you need to pretrain, for each gender, the submodules on g
 ```shell
 python hit/train.py exp_name=pretrained_female smpl_cfg.gender=female train_cfg=train_smpl data_cfg.synt_style=random  data_cfg.synthetic=True  trainer.max_epochs=200  train_cfg.networks.lbs.dropout=0.001 
 ```
-
 
 ### HIT
 Once this trained for a gender, edit the path to the pretrained network `pretrained_female_smpl` in `hit/hit_config.py`.
@@ -207,21 +237,32 @@ To debug you might want to turn off wandb and use a single worker so that breakp
 ## Metrics
 Generate the test metrics (Accuracy, IOU, Dice score)
 ```shell
-python train.py exp_name=hit_female smpl_cfg.gender=female  run_eval=True wdboff=True
-```
-
-## 3D meshes
-Generate the inferered 3D volumes for the test set
-```shell
-python train.py exp_name=hit_female smpl_cfg.gender=female  run_eval=True wdboff=True  eval_export_visuals=True visuals_only=True
-```
-
-## Slices
-Predict occupancy on all the test slices, that might take a while.
-```shell
-python hit/train.py exp_name=hit_female smpl_cfg.gender=male  run_eval=True wdboff=True  slices=True 
+python hit/train.py exp_name=hit_female smpl_cfg.gender=female  run_eval=True wdboff=True
 ```
 
 # Acknowledgments
 
-We thank the authors of the [COAP](https://github.com/markomih/COAP) and [gDNA](https://github.com/xuchen-ethz/gdna) for their codebase. HIT is built on top of these two projects. We also thank Soubhik Sanyal for his help on the project.
+We thank the authors of the [COAP](https://github.com/markomih/COAP) and [gDNA](https://github.com/xuchen-ethz/gdna) for their codebase. HIT is built on top of these two projects. 
+We also thank Soubhik Sanyal for his help on the project.
+
+# Citation
+
+If you use this code, please cite the following paper:
+
+```
+@inproceedings{Keller:CVPR:2024,
+ title = {{HIT}: Estimating Internal Human Implicit Tissues from the Body Surface},
+ author = {Keller, Marilyn and Arora, Vaibhav and Dakri, Abdelmouttaleb and Chandhok, Shivam and 
+ Machann, Jürgen and Fritsche, Andreas and Black, Michael J. and Pujades, Sergi},   
+ booktitle = {Proceedings IEEE/CVF Conf.~on Computer Vision and Pattern Recognition (CVPR)},
+ month = jun,
+ year = {2024},
+ month_numeric = {6}}
+```
+
+## Contact
+
+For more questions, please contact hit@tue.mpg.de
+
+This code repository in the provided [License](LICENSE.txt).
+For the licensing of the retrained models and the dataset, please refer to the HIT project page [https://hit.is.tue.mpg.de/].

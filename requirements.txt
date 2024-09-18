@@ -11,3 +11,4 @@ datasets
 hydra-core
 pysdf
 pytorch-lightning==1.9.0
+prettytable
