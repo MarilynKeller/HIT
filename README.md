@@ -17,7 +17,7 @@ Official repo of the CVPR 2024 paper: *HIT: Estimating Internal Human Implicit T
 - [Testing HIT](#testing)
 
 ## What is HIT ?
-HIT is a neural network that learns to infer the internal tissues of the human body from its surface. The input is a 3D body represented as SMPL parameters (a shape vector β and a pose vector θ) and a 3D point coordinates. The output is the the probability of the input point being inside the following tissue:
+HIT is a neural network that learns to infer the internal tissues of the human body from its surface. The input is a 3D body represented as SMPL parameters (a shape vector β and a pose vector θ) and a 3D point coordinates. The output is the probability of the input point being inside the following tissue:
 - lean tissue (muscles, organs) (LT)
 - adipose tissue (subcutaneous) (AT)
 - bone (BT)
