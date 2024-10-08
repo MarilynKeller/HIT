@@ -1,6 +1,6 @@
 # HIT
 
-Official repo of the 2024 paper: *HIT: Estimating Internal Human Implicit Tissues from the Body Surface*
+Official repo of the CVPR 2024 paper: *HIT: Estimating Internal Human Implicit Tissues from the Body Surface*
 
 [[paper]](https://hit.is.tue.mpg.de/media/upload/4978.pdf) [[project page]](https://hit.is.tue.mpg.de/)
 
